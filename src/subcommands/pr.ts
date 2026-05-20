@@ -1,7 +1,7 @@
 import { ANNOTATED_FILE } from '../utils/config';
 import { assert_gh_key } from '../utils/fetch';
 import { read_saved_mods, type mod_object } from '../utils/mods';
-import { log_err, log_failure_block, log_info, log_ok, log_warn, tag_count, tag_neutral, tag_primary } from '../utils/log';
+import { log_debug, log_err, log_failure_block, log_info, log_ok, log_warn, tag_count, tag_neutral, tag_primary } from '../utils/log';
 import { apply_nodes_in_order, build_dep_graph, new_gh_cache, type BuildOpts, type DepGraph, type DepNode, type PRStateKind } from './pr/graph';
 import { resolve_artifact_for_url, type Artifact } from './pr/resolve';
 
@@ -145,6 +145,7 @@ export async function pr_gate(source_url: string | undefined, options: GateOptio
         return;
     }
     assert_gh_key();
+    log_debug(`Gate options: build_job=${options.build_job ?? '<none>'}, allow_external_owners=${options.allow_external_owners ?? false}, other_allowed_owners=[${(options.other_allowed_owners ?? []).join(', ')}]`);
     const mod_map = await read_saved_mods(ANNOTATED_FILE);
     const cache = new_gh_cache();
 
@@ -154,6 +155,8 @@ export async function pr_gate(source_url: string | undefined, options: GateOptio
         other_allowed_owners: options.other_allowed_owners,
         skip_artifact_download: true,
     }, mod_map, cache);
+
+    log_debug(`Graph built: ${graph.nodes.size} node(s), apply_order=[${graph.apply_order.join(', ')}], preflight_failures=${graph.preflight_failures.length}, owner_rejections=${graph.owner_rejections.length}, resolve_failures=${graph.resolve_failures.length}`);
 
     let blocked = false;
     log_info(`Gate report for ${tag_primary(source_url)}:`);

@@ -31,19 +31,32 @@ export function parse_gh_url(url: string):
 }
 
 // GitHub PR URL base pattern - matches the URL up to and including the PR number
-const GH_URL = String.raw`https:\/\/github\.com\/(?:repos\/)?[^\/]+\/[^\/]+\/pull\/\d+`;
+const GH_URL = String.raw`https://github\.com/[^/]+/[^/]+/pull/\d+`;
+
+// GitHub shorthand PR reference: #123 or owner/repo#123
+const GH_SHORTHAND = String.raw`(?:[a-zA-Z0-9_.-]+/[a-zA-Z0-9_.-]+)?#\d+`;
+
+// Combined pattern for either form
+const GH_REF = `(?:${GH_URL}|${GH_SHORTHAND})`;
 
 // Each alternation handles a specific delimiter pair, consuming everything up to the closing delimiter.
 // The undelimited case comes last so delimited cases take priority.
+function make_delimited(pattern: string): string[] {
+    return [
+        String.raw`\(${pattern}[^\s,)]*\)`,       // (ref)  - parentheses
+        String.raw`\[${pattern}[^\s,\]]*\]`,      // [ref]  - square brackets
+        String.raw`\{${pattern}[^\s,}]*\}`,       // {ref}  - curly braces
+        String.raw`<${pattern}[^\s,>]*>`,         // <ref>  - angle brackets
+        String.raw`\`${pattern}[^\s,\`]*\``,     // `ref`  - backticks
+        String.raw`"${pattern}[^\s,"]*"`,         // "ref"  - double quotes
+        String.raw`'${pattern}[^\s,']*'`,         // 'ref'  - single quotes
+        String.raw`${pattern}[^\s,)}\]>\`"'\\]*`, // ref    - undelimited, stops before any closing delimiter
+    ];
+}
+
 const DELIMITED = [
-    String.raw`\(${GH_URL}[^\s,)]*\)`, // (url)  - parentheses
-    String.raw`\[${GH_URL}[^\s,\]]*\]`, // [url]  - square brackets
-    String.raw`<${GH_URL}[^\s,>]*>`, // <url>  - angle brackets
-    String.raw`\`${GH_URL}[^\s,\`]*\``, // `url`  - backticks
-    String.raw`"${GH_URL}[^\s,"]*"`, // "url"  - double quotes
-    String.raw`'${GH_URL}[^\s,']*'`, // 'url'  - single quotes
-    String.raw`${GH_URL}[^\s,)}\]>\`"']*`, // url    - undelimited, stops before any closing delimiter
-    //          so we don't accidentally consume a trailing one
+    ...make_delimited(GH_URL),
+    ...make_delimited(GH_SHORTHAND),
 ].join('|');
 
 const REQUIRED_PR_PATTERN = new RegExp(
@@ -51,53 +64,93 @@ const REQUIRED_PR_PATTERN = new RegExp(
     // 1. "depends/relies on (pr)"
     // 2. "requires/required (qualifier) (pr)" - pr optional
     // 3. "(qualifier) (pr) requires/required" - reversed word order e.g. "this pr requires"
+    // 4. "req" - just standalone
     String.raw`(?:` +
-        String.raw`(?:depends|relies)[ \t]*on[ \t]*(?:pr)?` +
-        String.raw`|require(?:s|d)[ \t]*(?:(?:this|other|parent|sister|a|the)[ \t]*)?(?:\bpr\b)?` +
+        String.raw`(?:depends|relies)[ \t]*on[ \t]*(?:\bpr\b[ \t]*)?` +
+        String.raw`|require(?:s|d)[ \t]*(?:(?:this|other|parent|sister|a|the)[ \t]*)?(?:\bpr\b[ \t]*)?` +
         String.raw`|(?:(?:this|other|parent|sister|a|the)[ \t]*)?\bpr\b[ \t]*require(?:s|d)` +
+        String.raw`|\breq\b` +
         String.raw`)` +
         // Optional colon separator with surrounding horizontal whitespace
         String.raw`[ \t]*:?[ \t]*` +
-        // Assert that a GitHub PR URL follows before consuming anything into pr_list
-        // Accounts for optional opening delimiter before the URL
-        String.raw`(?=[({\[<\`"']?https:\/\/github\.com\/)` +
-        // Capture the full list of URLs into pr_list.
-        // Each URL can be delimited or bare, optionally followed by a comma separator.
-        // The outer + allows multiple comma-separated URLs.
+        // Assert that a GitHub PR URL or shorthand follows before consuming anything into pr_list.
+        // Accounts for optional opening delimiter before the ref (for weird markdown syntax).
+        String.raw`(?=[({\[<\`"']?(?:https://github\.com/|(?:[a-zA-Z0-9_.-]+/[a-zA-Z0-9_.-]+)?#\d))` +
+        // Capture the full list of refs into pr_list.
+        // Each ref can be delimited or bare, optionally followed by a comma separator.
+        // The outer + allows multiple comma-separated refs.
         String.raw`(?<pr_list>(?:(?:${DELIMITED})(?:[ \t]*,[ \t]*)?)+)`,
 
     'gi',
 );
 
-function strip_url_delimiters(url: string): string {
-    return url.trim().replace(/^[({\[<`"']|[)}\]>`"']$/g, '');
+function strip_ref_delimiters(ref: string): string {
+    return ref.trim().replace(/^[({\[<`"']|[)}\]>`"']$/g, '');
 }
 
-function extract_urls_from_pr_list(pr_list: string): string[] {
+type ExtractedRef =
+    | { type: 'url'; value: string }
+    | { type: 'shorthand'; value: string };
+
+function extract_refs_from_pr_list(pr_list: string): ExtractedRef[] {
     return pr_list
         .split(/[ \t]*,[ \t]*/)
-        .map(strip_url_delimiters)
-        .filter((url) => url.startsWith('https://'));
+        .map(strip_ref_delimiters)
+        .flatMap((ref): ExtractedRef[] => {
+            if (ref.startsWith('https://')) {
+                return [{ type: 'url', value: ref }];
+            }
+            // Match optional owner/repo prefix + #number
+            if (/^(?:[a-zA-Z0-9_.-]+\/[a-zA-Z0-9_.-]+)?#\d+$/.test(ref)) {
+                return [{ type: 'shorthand', value: ref }];
+            }
+            return [];
+        });
 }
 
-export function extract_required_prs(input: string): {
-    raw_match: string;
-    pr_urls: string[];
-}[] {
-    const results: {
-        raw_match: string;
-        pr_urls: string[];
-    }[] = [];
+export type RequiredPR = {
+    /** Resolved GitHub PR URL, if known */
+    url: string | null;
+    /** Raw shorthand like #123 or owner/repo#123, if that's what was found */
+    shorthand: string | null;
+    /**
+     * True when the reference is a bare shorthand (#123 / owner/repo#123).
+     * GitHub shorthands can point to issues as well as PRs, so we cannot
+     * confirm this is actually a PR without an API call.
+     */
+    uncertain: boolean;
+};
 
-    for (const match of input.matchAll(REQUIRED_PR_PATTERN)) {
+export type RequiredPRMatch = {
+    refs: RequiredPR[];
+    raw_match: string;
+};
+
+export function extract_required_prs(body: string): RequiredPRMatch[] {
+    const results: RequiredPRMatch[] = [];
+
+    for (const match of body.matchAll(REQUIRED_PR_PATTERN)) {
         const pr_list = match.groups?.pr_list;
         if (!pr_list) continue;
 
-        results.push({
-            raw_match: match[0],
-            pr_urls: extract_urls_from_pr_list(pr_list),
+        const extracted = extract_refs_from_pr_list(pr_list);
+
+        const refs: RequiredPR[] = extracted.map((ref) => {
+            if (ref.type === 'url') {
+                return { url: ref.value, shorthand: null, uncertain: false };
+            } else {
+                return { url: null, shorthand: ref.value, uncertain: true };
+            }
         });
+
+        if (refs.length > 0) {
+            results.push({ refs, raw_match: match[0] });
+        }
     }
 
     return results;
 }
+
+// export function test_body_match() {
+//     console.log(extract_required_prs(`req https://github.com/a/b/pull/734, #745, a/b#812\\r\\n<img width="364" height="367" alt="image" src="https://github.com/user-attachments/assets/becdec96-85de-4f64-bca3-e9a89967fa0b" />\\r\\n`)[0]?.refs)
+// }

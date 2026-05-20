@@ -612,7 +612,7 @@ const commands: Record<string, CommandDefinition> = {
             //         [],
             //     ),
             // );
-            // test_pr_extraction()
+            // test_body_match()
         },
     },
 };

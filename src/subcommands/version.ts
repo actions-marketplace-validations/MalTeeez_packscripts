@@ -14,7 +14,7 @@ import { are_all_mods_unlocked, default_mod_object, is_mod_ignored_by_name, pars
 import { CLIColor, clone, finish_live_zone, hash_buffer, init_live_zone, is_finished, live_log, render_md, rev_replace_all, update_live_zone } from '../utils/utils';
 import { mkdir, rename, rm } from 'node:fs/promises';
 import { toNamespacedPath } from 'node:path';
-import { extract_required_prs, parse_gh_url } from '../utils/sources';
+import { parse_gh_url } from '../utils/sources';
 import { get_dl_url_from_github_url, type Artifact } from './pr';
 
 interface ReleaseAsset {

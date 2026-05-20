@@ -1,5 +1,5 @@
 import { query_gh_project_by_url } from '../../utils/fetch';
-import { parse_gh_url } from '../../utils/sources';
+import { parse_gh_url, type RequiredPR, type RequiredPRMatch } from '../../utils/sources';
 import { delay } from '../../utils/utils';
 import { log_debug, log_step, log_warn, tag_count, tag_dim, tag_neutral, tag_primary } from '../../utils/log';
 
@@ -86,12 +86,13 @@ export async function resolve_artifact_for_url(source_url: string, opts?: Resolv
         return { ok: false, reason: 'not_supported_url', detail: `URL primary '${primary ?? '<none>'}' is not handled by resolve_artifact_for_url.` };
     }
 
+    log_debug("Picking workflow pirun from commits...")
     const pick = await pick_run_from_shas(source_url, shas, merged_opts);
     if (pick == undefined) {
         return { ok: false, reason: 'no_workflow_runs', detail: `No workflow runs found across ${shas.length} commit(s).` };
     }
     if (!pick.ok) return pick;
-
+    
     return select_artifact_from_workflow(source_url, pick.run, pick.other_runs, pick.sha, merged_opts);
 }
 
@@ -165,7 +166,7 @@ async function pick_run_from_shas(
         // If picked run is completed, return it.
         if (target.status === 'completed') {
             const other_runs = runs.filter((r) => r.id !== target.id);
-            log_step(`Picked workflow ${tag_primary(target.name)} on commit ${tag_dim(sha.slice(0, 7))}.`);
+            log_step(`Picked primary workflow ${tag_primary(target.name)} on commit ${tag_dim(sha.slice(0, 7))}.`);
             return { ok: true, run: target, other_runs, sha };
         }
 
@@ -263,10 +264,10 @@ async function select_artifact_from_workflow(
     // Build candidate workflow list - the chosen run first, plus any siblings (for the case where
     // multiple workflows ran on the same commit and the artifact lives on a sibling, not this run).
     const workflows = [run, ...other_runs];
-    let collected: Artifact[] = [];
+    let collected: { artifact: Artifact, src_run: WorkflowRunSummary }[] = [];
     for (const wf of workflows) {
         const artifacts = await fetch_artifacts_for_run(source_url, wf.id);
-        const usable = artifacts.filter((a) => !a.expired);
+        const usable = artifacts.filter((a) => !a.expired).map((arti) => { return { artifact: arti, src_run: wf }});
 
         // If build_job filter matches this workflow, use it exclusively (skip the other workflows).
         if (opts.build_job != undefined && wf.name.toLowerCase() === opts.build_job.toLowerCase()) {
@@ -283,17 +284,22 @@ async function select_artifact_from_workflow(
     // Filter by name if requested.
     if (opts.artifact_name != undefined) {
         const filter = opts.artifact_name.toLowerCase();
-        const matched = collected.find((a) => a.name.toLowerCase().includes(filter));
+        const matched = collected.find((item) => item.artifact.name.toLowerCase().includes(filter));
         if (matched == undefined) {
             return { ok: false, reason: 'artifact_filter_miss', detail: `No artifact matched filter '${opts.artifact_name}' among ${collected.length} candidates.`, link: run.html_url };
         }
-        return { ok: true, reason: 'workflow_artifact', artifact: matched, run_url: run.html_url, resolved_sha, other_runs };
+        log_debug(`Selected specific artifact (${tag_neutral(matched.artifact.name)}) from run ${tag_neutral(matched.src_run.name)} (${tag_dim(matched.src_run.id)})...`);
+
+        return { ok: true, reason: 'workflow_artifact', artifact: matched.artifact, run_url: run.html_url, resolved_sha, other_runs };
     }
 
     if (collected.length > 1) {
-        log_warn(`Found ${collected.length} artifacts; using first ('${collected[0]?.name}'). Use --artifact_name to filter.`);
+        log_warn(`Found ${collected.length} artifacts; using first ('${collected[0]?.artifact.name}'). Use --artifact_name to filter.`);
+    } else {
+        log_debug(`Selected artifact (${tag_neutral(collected[0]!.artifact.name)}) from run ${tag_neutral(run.name)} (${tag_dim(run.id)})...`);
     }
-    return { ok: true, reason: 'workflow_artifact', artifact: collected[0]!, run_url: run.html_url, resolved_sha, other_runs };
+
+    return { ok: true, reason: 'workflow_artifact', artifact: collected[0]!.artifact, run_url: run.html_url, resolved_sha, other_runs };
 }
 
 // Returns artifacts with their digest stripped of the leading "sha256:" prefix.
@@ -307,4 +313,64 @@ export async function fetch_artifacts_for_run(source_url: string, run_id: number
         digest: typeof a.digest === 'string' && a.digest.startsWith('sha256:') ? a.digest.slice(7) : a.digest,
         expired: a.expired,
     }));
+}
+
+//#region Verify PR refs
+
+const SHORTHAND_RE = /^(?:([a-zA-Z0-9_.-]+)\/([a-zA-Z0-9_.-]+))?#(\d+)$/;
+
+interface VerifiedRequiredPRMatch {
+    raw_match: string,
+    urls: string[]
+}
+
+// Verify uncertain shorthands (#N or owner/repo#N) against the GitHub pulls API.
+// Bare #N refs are resolved using context_owner/context_project (the PR whose body is being parsed).
+// Refs that resolve to issues or non-existent numbers are discarded; each discard is logged to debug.
+// Returns a new match list with uncertain refs either confirmed (uncertain=false, url set) or removed.
+export async function verify_uncertain_refs(
+    matches: RequiredPRMatch[],
+    context_owner: string,
+    context_project: string,
+): Promise<VerifiedRequiredPRMatch[]> {
+    const results: VerifiedRequiredPRMatch[] = [];
+
+    for (const match of matches) {
+        const verified: string[] = [];
+
+        for (const ref of match.refs) {
+            if (!ref.uncertain) {
+                verified.push(ref.url as string);
+                continue;
+            }
+
+            const shorthand = ref.shorthand!;
+            const m = shorthand.match(SHORTHAND_RE);
+            if (m == null) {
+                log_debug(`verify_uncertain_refs: unparseable shorthand '${shorthand}'; discarding`);
+                continue;
+            }
+
+            const owner = m[1] ?? context_owner;
+            const project = m[2] ?? context_project;
+            const number = m[3]!;
+            const repo_url = `https://github.com/${owner}/${project}`;
+
+            const { status } = await query_gh_project_by_url(repo_url, `/pulls/${number}`, undefined, [404]);
+            if (status !== '200') {
+                log_debug(`verify_uncertain_refs: '${shorthand}' -> ${owner}/${project}#${number} is not a PR (status=${status}); discarding`);
+                continue;
+            }
+
+            verified.push(
+                `https://github.com/${owner}/${project}/pull/${number}`,
+            );
+        }
+
+        if (verified.length > 0) {
+            results.push({ urls: verified, raw_match: match.raw_match });
+        }
+    }
+
+    return results;
 }

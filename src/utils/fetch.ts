@@ -32,13 +32,13 @@ export async function query_gh_project_by_url(
     const url_match = parse_gh_url(url);
     if (url_match != undefined) {
         const { owner, project } = url_match;
-        const url = `/repos/${owner}/${project}/${sub_repo_api_path.replace(/^\//m, '')}`;
+        const api_path = sub_repo_api_path.replace(/^\//m, '');
+        const url = `/repos/${owner}/${project}${api_path.length > 0 ? "/" : ""}${api_path}`;
 
         const res: Response | undefined = await gh_request(url, gh_api_key, 'GET');
         if (res == undefined || !res.ok) {
             if (res && !ignore_codes.includes(res.status)) {
                 console.warn(`W: Failed to get releases with ${res.status} | ${res.statusText} for ${project} (${url})`);
-                throw new Error();
             }
             return { headers: res.headers, body: undefined, status: String(res.status) };
         } else {

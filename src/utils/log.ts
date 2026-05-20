@@ -36,7 +36,7 @@ export function log_step(msg: string, link?: string): void {
 
 // Green check, for finished-successfully lines.
 export function log_ok(msg: string, link?: string): void {
-    console.info(with_link(`${CLIColor.FgGreen11}✔${CLIColor.Reset} ${msg}`, link));
+    console.info(with_link(`${CLIColor.FgGreen11}✔${CLIColor.Reset}  ${msg}`, link));
 }
 
 // Yellow WARN prefix - non-fatal issues the user should know about.
