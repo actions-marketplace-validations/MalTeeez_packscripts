@@ -65,14 +65,16 @@ export function new_gh_cache(): GhCache {
     };
 }
 
-export interface PreflightFailureRecord { initial_pr_id: string; dep_url: string; result: PreflightResult; }
-export interface ResolveFailureRecord   { node_id: string; reason: ResolveFailureReason | 'daily_baseline_unknown'; detail: string; link?: string; }
-export interface OwnerRejectionRecord   { from_pr_id: string; dep_owner: string; dep_url: string; }
+export interface PreflightFailureRecord  { initial_pr_id: string; dep_url: string; result: PreflightResult; }
+export interface PreflightAbsorbedRecord { initial_pr_id: string; dep_url: string; result: PreflightResult; }
+export interface ResolveFailureRecord    { node_id: string; reason: ResolveFailureReason | 'daily_baseline_unknown'; detail: string; link?: string; }
+export interface OwnerRejectionRecord    { from_pr_id: string; dep_owner: string; dep_url: string; }
 
 export interface DepGraph {
     root_id?: string;
     nodes: Map<string, DepNode>;
     apply_order: string[];
+    preflight_absorbed: PreflightAbsorbedRecord[];
     preflight_failures: PreflightFailureRecord[];
     resolve_failures:   ResolveFailureRecord[];
     owner_rejections:   OwnerRejectionRecord[];
@@ -273,6 +275,7 @@ export async function find_merged_prs_since_daily(
     if (baseline_version == undefined) {
         const repo_to_mods = build_repo_to_mods(mod_map);
         const mods = repo_to_mods.get(repo_key);
+        log_debug(`Repository ${repo_key} is upstream for mod ${mods}`)
         if (mods == undefined) {
             return {
                 ok: false,
@@ -367,6 +370,7 @@ export async function build_dep_graph(root_pr_url: string, opts: BuildOpts, mod_
     const graph: DepGraph = {
         nodes: new Map(),
         apply_order: [],
+        preflight_absorbed: [],
         preflight_failures: [],
         resolve_failures: [],
         owner_rejections: [],
@@ -452,6 +456,8 @@ async function expand_pr_node(node: DepNode, graph: DepGraph, traced: Set<string
                 const preflight_res = await preflight_same_repo_dep(initial, dep_classify.pr, default_branch, cache);
                 if (!preflight_res.ok) {
                     graph.preflight_failures.push({ initial_pr_id: initial.pr_id, dep_url, result: preflight_res });
+                } else {
+                    graph.preflight_absorbed.push({ initial_pr_id: initial.pr_id, dep_url, result: preflight_res });
                 }
                 // Pass or fail, same-repo deps NEVER enter the dep graph.
                 continue;

@@ -3,7 +3,7 @@ import { parse_gh_url } from './sources';
 import type { JsonObject } from './utils';
 import { is_mod_ignored_by_name, type SourceType } from './mods';
 import { GITHUB_API_KEY } from './config';
-import { log_debug } from './log';
+import { log_debug, tag_count, tag_ok } from './log';
 
 export const SOURCE_API_KEYS: Map<SourceType, string> = new Map();
 
@@ -33,7 +33,7 @@ export async function query_gh_project_by_url(
     if (url_match != undefined) {
         const { owner, project } = url_match;
         const api_path = sub_repo_api_path.replace(/^\//m, '');
-        const url = `/repos/${owner}/${project}${api_path.length > 0 ? "/" : ""}${api_path}`;
+        const url = `/repos/${owner}/${project}${api_path.length > 0 ? '/' : ''}${api_path}`;
 
         const res: Response | undefined = await gh_request(url, gh_api_key, 'GET');
         if (res == undefined || !res.ok) {
@@ -77,23 +77,25 @@ export function download_file(
                 `W: Failed to download file ${file_name} from ${source_type} with ${res.status} | ${res.statusText}. Headers: ${JSON.stringify(res.headers.toJSON())}`,
             );
         }
+        log_debug(`Started download for file ${tag_ok(file_name)} of size ${tag_count(content_length)}`, source);
         content_length = Number(content_length);
 
         const file = Bun.file(`${destination}/${file_name}`);
         const writer = file.writer({ highWaterMark: 1024 * 1024 });
 
         let written_bytes = 0;
-        for await (const chunk of res.body) {
-            // Await is actually needed here, since .write() returns a promise
-            written_bytes += await (writer.write(chunk) as unknown as Promise<number>).catch(() => {
-                reject(`W: Failed to write chunk of ${destination}/${file_name} to disk`);
-                return 0;
-            });
+        try {
+            for await (const chunk of res.body) {
+                written_bytes += await writer.write(chunk);
+            }
+        } catch {
+            await writer.end();
+            return reject(`W: Failed to write chunk of ${destination}/${file_name} to disk`);
         }
 
-        await writer.flush();
+        await writer.end(); // end() flushes + closes; no need for separate flush()
 
-        if (written_bytes == content_length) {
+        if (written_bytes === content_length) {
             resolve(`Wrote ${written_bytes} bytes to disk for ${file_name}`);
         } else {
             reject(`W: Failed to write filestream to disk. Wrote ${written_bytes} bytes, expected ${content_length}`);

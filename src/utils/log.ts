@@ -74,6 +74,11 @@ export function tag_dim(s: string | number): string {
     return `${CLIColor.FgGray18}${s}${CLIColor.Reset}`;
 }
 
+// Attachment detail - files & paths. Provides brackets
+export function tag_bracket(s: string | number): string {
+    return `${CLIColor.FgGray}(${tag_dim(s)}${CLIColor.FgGray})${CLIColor.Reset}`
+}
+
 // Number-worth-emphasising - counts, sizes, "N of M".
 export function tag_count(n: string | number): string {
     return `${CLIColor.FgWhite}${CLIColor.Bright}${n}${CLIColor.Reset}`;

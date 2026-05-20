@@ -16,6 +16,7 @@ import { mkdir, rename, rm } from 'node:fs/promises';
 import { toNamespacedPath } from 'node:path';
 import { parse_gh_url } from '../utils/sources';
 import { get_dl_url_from_github_url, type Artifact } from './pr';
+import { log_debug, log_info, log_ok, log_step, tag_bracket, tag_neutral, tag_primary } from '../utils/log';
 
 interface ReleaseAsset {
     url: string;
@@ -715,7 +716,7 @@ export async function apply_github_artifact(
 
     const temp_dir = DOWNLOAD_TEMP_DIR.replace(/\/$/m, '') + '/indev';
     if (path_is_directory(temp_dir)) {
-        console.info(`Old temp dir at ${CLIColor.FgGray}(${CLIColor.FgGray18}${temp_dir}${CLIColor.FgGray})${CLIColor.Reset} exists, recreating..`);
+        log_info(`Old temp dir at ${CLIColor.FgGray}(${CLIColor.FgGray18}${temp_dir}${CLIColor.FgGray})${CLIColor.Reset} exists, recreating..`);
         await rm(temp_dir, { recursive: true });
     }
 
@@ -747,7 +748,7 @@ export async function apply_github_artifact(
         console.error(`${CLIColor.FgRed10}ERR:${CLIColor.Reset} Downloaded file matches expected but is not a zip file. We can only handle zip files for now.`);
         return;
     } else {
-        console.info(`${CLIColor.FgGreen11}✔${CLIColor.Reset} Downloaded file!`);
+        log_step(`Downloaded artifact zip ${tag_primary(artifact.name + ".zip")}`)
     }
 
     // Find .jar file in zip we want and extract it
@@ -784,10 +785,10 @@ export async function apply_github_artifact(
 
     // Jar was recognized as a mod, update / add it via our tracked mods
     if (mod_obj != undefined) {
-        console.info(
-            `Mod ${CLIColor.BgBlue0}${CLIColor.FgWhite1}${CLIColor.Bright} ${mod_id} ${CLIColor.Reset} is a tracked mod, currently under ` +
-                `${CLIColor.FgGray}(${CLIColor.FgGray18}${mod_obj.file_path}${CLIColor.FgGray})${CLIColor.Reset} ` +
-                `with version ${CLIColor.BgTeal3}${CLIColor.FgWhite1}${CLIColor.Bright} ${mod_obj.update_state.version} ${CLIColor.Reset}.`,
+        log_debug   (
+            `Mod ${tag_primary(mod_id)} is a tracked mod, currently under ` +
+                `${tag_bracket(mod_obj.file_path)} ` +
+                `with version ${tag_neutral(mod_obj.update_state.version ?? "UNKNOWN")}.`,
         );
         const old_jar = Bun.file(mod_obj.file_path);
         if (await old_jar.exists()) {
@@ -810,8 +811,8 @@ export async function apply_github_artifact(
         mod_obj.source = artifact.archive_download_url;
         mod_obj.update_state.last_updated_at = new Date(Date.now()).toISOString();
     } else {
-        console.info(
-            `Mod ${CLIColor.BgBlue0}${CLIColor.FgWhite1}${CLIColor.Bright} ${mod_id} ${CLIColor.Reset} is not a tracked mod, but we were able to recognize it as one.`,
+        log_info(
+            `Mod ${tag_primary(mod_id)} is not yet tracked, adding to map.`,
         );
 
         await rename_file(jar_file_path, jar_mod_path);
@@ -831,9 +832,9 @@ export async function apply_github_artifact(
     await save_map_to_file(ANNOTATED_FILE, mod_map);
 
     const final_version = mod_version ?? artifact.name + '-dirty';
-    console.info(
-        `${CLIColor.FgGreen11}✔${CLIColor.Reset} Finished updating mod ${CLIColor.BgBlue0}${CLIColor.FgWhite1}${CLIColor.Bright} ${mod_id} ${CLIColor.Reset} ` +
-            `to indev version ${CLIColor.BgBlue0}${CLIColor.FgWhite1}${CLIColor.Bright} ${final_version} ${CLIColor.Reset} ` +
-            `${CLIColor.FgGray}(${CLIColor.FgGray18}${jar_mod_path.replace(MOD_BASE_DIR + '/', '')}${CLIColor.FgGray})${CLIColor.Reset}.`,
+    log_ok(
+        `Finished updating mod ${tag_primary(mod_id)} ` +
+            `to indev version ${tag_neutral(final_version)} ` +
+            `${tag_bracket(jar_mod_path.replace(MOD_BASE_DIR + '/', ''))}.`,
     );
 }

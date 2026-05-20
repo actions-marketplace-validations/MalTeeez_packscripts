@@ -60,8 +60,20 @@ export async function apply_github_pr(source_url: string | undefined, options: A
         skip_artifact_download: false,
     };
 
-    log_info(`Building dep graph from ${tag_primary(source_url)}...`);
+    log_info(`Building dependency graph from ${tag_primary(source_url)}...`);
     const graph = await build_dep_graph(source_url, build_opts, mod_map, cache);
+
+    if (graph.preflight_absorbed.length > 0 || graph.preflight_failures.length > 0) {
+        log_info(`Preflight report for ${tag_primary(source_url)}:`);
+        for (const pf of graph.preflight_absorbed) {
+            log_ok(`  ${tag_neutral(pf.dep_url)} - ${pf.result.reason}`);
+        }
+        for (const pf of graph.preflight_failures) {
+            log_err(`  ${tag_neutral(pf.dep_url)} - ${pf.result.reason}`);
+        }
+    } else {
+        log_info("Preflight passed without any found dependencies.")
+    }
 
     // Surface failures (preflight + resolve + owner). If any are present, abort before apply.
     const root_pr = graph.nodes.get(graph.root_id ?? '')?.pr_meta;
@@ -172,6 +184,11 @@ export async function pr_gate(source_url: string | undefined, options: GateOptio
             log_err(`  ${tag_neutral(id)} - ${state}`, node.release_html_url ?? node.pr_meta?.pr_url);
         }
     }
+
+    for (const pf of graph.preflight_absorbed) {
+        log_ok(`  ${tag_neutral(pf.dep_url)} - ${pf.result.reason}`);
+    }
+
     for (const pf of graph.preflight_failures) {
         blocked = true;
         log_err(`  preflight ${pf.result.reason}: ${pf.dep_url}`);

@@ -86,7 +86,7 @@ export async function resolve_artifact_for_url(source_url: string, opts?: Resolv
         return { ok: false, reason: 'not_supported_url', detail: `URL primary '${primary ?? '<none>'}' is not handled by resolve_artifact_for_url.` };
     }
 
-    log_debug("Picking workflow pirun from commits...")
+    log_debug("Collecting workflows from commits...")
     const pick = await pick_run_from_shas(source_url, shas, merged_opts);
     if (pick == undefined) {
         return { ok: false, reason: 'no_workflow_runs', detail: `No workflow runs found across ${shas.length} commit(s).` };
@@ -166,7 +166,7 @@ async function pick_run_from_shas(
         // If picked run is completed, return it.
         if (target.status === 'completed') {
             const other_runs = runs.filter((r) => r.id !== target.id);
-            log_step(`Picked primary workflow ${tag_primary(target.name)} on commit ${tag_dim(sha.slice(0, 7))}.`);
+            log_step(`Found ${tag_count([target, ...other_runs].length)} workflow(s) on commit ${tag_dim(sha.slice(0, 7))}.`);
             return { ok: true, run: target, other_runs, sha };
         }
 
@@ -296,7 +296,7 @@ async function select_artifact_from_workflow(
     if (collected.length > 1) {
         log_warn(`Found ${collected.length} artifacts; using first ('${collected[0]?.artifact.name}'). Use --artifact_name to filter.`);
     } else {
-        log_debug(`Selected artifact (${tag_neutral(collected[0]!.artifact.name)}) from run ${tag_neutral(run.name)} (${tag_dim(run.id)})...`);
+        log_step(`Selected artifact (${tag_neutral(collected[0]!.artifact.name)}) from run ${tag_neutral(collected[0]!.src_run.name)} (${tag_dim(collected[0]!.src_run.id)})...`);
     }
 
     return { ok: true, reason: 'workflow_artifact', artifact: collected[0]!.artifact, run_url: run.html_url, resolved_sha, other_runs };
