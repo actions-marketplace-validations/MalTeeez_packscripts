@@ -1,6 +1,8 @@
 name: Run packscripts
 description: Download and run a packscripts command in CI
 author: MalTeeez
+icon: package
+color: blue
 
 inputs:
   command:
