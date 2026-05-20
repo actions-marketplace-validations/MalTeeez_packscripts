@@ -1,0 +1,115 @@
+name: Run packscripts
+description: Download and run a packscripts command in CI
+author: MalTeeez
+
+inputs:
+  command:
+    description: packscripts command to run (e.g. "pr gate ${{ github.event.pull_request.html_url }}")
+    required: true
+  github_token:
+    description: GitHub token passed as PACKSCRIPTS_GITHUB_API_KEY for API calls.
+    required: false
+    default: ${{ github.token }}
+  config:
+    description: Path or URL to the packscripts.json config file. Overrides the default config search.
+    required: false
+    default: ''
+  annotated_file:
+    description: Path or URL to the annotated mods JSON file. Overrides the value in packscripts.json.
+    required: false
+    default: ''
+  working_directory:
+    description: Working directory for packscripts. Required when config is a URL (defaults to the workspace root).
+    required: false
+    default: ${{ github.workspace }}
+
+outputs:
+  annotated_file_path:
+    description: Resolved on-disk path of the annotated mods file (useful when it was fetched from a URL).
+    value: ${{ steps.resolve.outputs.annotated_file_path }}
+
+runs:
+  using: composite
+  steps:
+    - name: Resolve annotated file path
+      id: resolve
+      shell: bash
+      run: |
+        ANNOTATED="${{ inputs.annotated_file }}"
+        WORKDIR="${{ inputs.working_directory }}"
+        if [[ "$ANNOTATED" == http://* ]] || [[ "$ANNOTATED" == https://* ]]; then
+          FILENAME="${ANNOTATED##*/}"
+          FILENAME="${FILENAME%%\?*}"
+          [ -z "$FILENAME" ] && FILENAME="annotated.json"
+          echo "annotated_file_path=${WORKDIR}/${FILENAME}" >> "$GITHUB_OUTPUT"
+        elif [[ -n "$ANNOTATED" ]]; then
+          echo "annotated_file_path=${ANNOTATED}" >> "$GITHUB_OUTPUT"
+        else
+          echo "annotated_file_path=" >> "$GITHUB_OUTPUT"
+        fi
+
+    - name: Download packscripts (Linux)
+      if: runner.os == 'Linux'
+      shell: bash
+      run: |
+        REF="${{ github.action_ref }}"
+        ARCH=$(uname -m)
+        if [ "$ARCH" = "aarch64" ] || [ "$ARCH" = "arm64" ]; then
+          BINARY="packscripts-arm"
+        else
+          BINARY="packscripts-nix"
+        fi
+        if [[ "$REF" == v* ]]; then
+          URL="https://github.com/MalTeeez/packscripts/releases/download/${REF}/${BINARY}"
+        else
+          URL="https://github.com/MalTeeez/packscripts/releases/latest/download/${BINARY}"
+        fi
+        curl -fsSL "$URL" -o "$GITHUB_ACTION_PATH/packscripts"
+        chmod +x "$GITHUB_ACTION_PATH/packscripts"
+
+    - name: Download packscripts (macOS)
+      if: runner.os == 'macOS'
+      shell: bash
+      run: |
+        REF="${{ github.action_ref }}"
+        if [[ "$REF" == v* ]]; then
+          URL="https://github.com/MalTeeez/packscripts/releases/download/${REF}/packscripts-osx"
+        else
+          URL="https://github.com/MalTeeez/packscripts/releases/latest/download/packscripts-osx"
+        fi
+        curl -fsSL "$URL" -o "$GITHUB_ACTION_PATH/packscripts"
+        chmod +x "$GITHUB_ACTION_PATH/packscripts"
+
+    - name: Download packscripts (Windows)
+      if: runner.os == 'Windows'
+      shell: pwsh
+      run: |
+        $REF = "${{ github.action_ref }}"
+        if ($REF -match '^v') {
+          $URL = "https://github.com/MalTeeez/packscripts/releases/download/$REF/packscripts-win.exe"
+        } else {
+          $URL = "https://github.com/MalTeeez/packscripts/releases/latest/download/packscripts-win.exe"
+        }
+        Invoke-WebRequest -Uri $URL -OutFile "$env:GITHUB_ACTION_PATH\packscripts.exe"
+
+    - name: Run packscripts (Linux/macOS)
+      if: runner.os != 'Windows'
+      shell: bash
+      env:
+        PACKSCRIPTS_GITHUB_API_KEY: ${{ inputs.github_token }}
+        PACKSCRIPTS_IS_LIMITED_ENV: '1'
+        PACKSCRIPTS_CONFIG: ${{ inputs.config }}
+        PACKSCRIPTS_ANNOTATED: ${{ inputs.annotated_file }}
+        PACKSCRIPTS_WORKDIR: ${{ inputs.working_directory }}
+      run: "$GITHUB_ACTION_PATH/packscripts ${{ inputs.command }}"
+
+    - name: Run packscripts (Windows)
+      if: runner.os == 'Windows'
+      shell: pwsh
+      env:
+        PACKSCRIPTS_GITHUB_API_KEY: ${{ inputs.github_token }}
+        PACKSCRIPTS_IS_LIMITED_ENV: '1'
+        PACKSCRIPTS_CONFIG: ${{ inputs.config }}
+        PACKSCRIPTS_ANNOTATED: ${{ inputs.annotated_file }}
+        PACKSCRIPTS_WORKDIR: ${{ inputs.working_directory }}
+      run: '& "$env:GITHUB_ACTION_PATH\packscripts.exe" ${{ inputs.command }}'

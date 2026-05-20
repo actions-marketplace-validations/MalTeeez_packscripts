@@ -3,11 +3,9 @@ import { binary_search_disable } from './subcommands/binary';
 import {
     enable_all_mods,
     disable_all_mods,
-    get_details_from_mainclass,
     type update_frequency,
     isUpdateFrequency,
     are_all_mods_unlocked,
-    filter_for_faulty_dependencies,
     parse_mod_details,
 } from './utils/mods';
 import { annotate } from './subcommands/annotate';
