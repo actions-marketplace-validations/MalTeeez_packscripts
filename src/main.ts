@@ -8,6 +8,7 @@ import {
     isUpdateFrequency,
     are_all_mods_unlocked,
     filter_for_faulty_dependencies,
+    parse_mod_details,
 } from './utils/mods';
 import { annotate } from './subcommands/annotate';
 import { disable_atomic_deep, enable_atomic_deep, list_mods, list_mods_folder, list_mods_wide, toggle_mod } from './subcommands/simple';
@@ -22,7 +23,7 @@ import {
 } from './subcommands/version';
 import { build_bootstrap, build_version_for_diff, bundle_pack_into_starter, initialize_packaging } from './subcommands/package';
 import { package_image } from './subcommands/image';
-import { assert_config_exists, CI_INTEGRATION } from './utils/config';
+import { assert_config_exists, CI_INTEGRATION, MOD_BASE_DIR } from './utils/config';
 import { init_config } from './subcommands/init';
 import { apply_github_pr, pr_gate } from './subcommands/pr';
 import { set_debug_enabled } from './utils/log';
@@ -605,14 +606,7 @@ const commands: Record<string, CommandDefinition> = {
     debug: {
         description: 'Run debug operations',
         handler: async (args) => {
-            // console.log(
-            //     filter_for_faulty_dependencies(
-            //         (await get_details_from_mainclass('./.minecraft/mods/' + args[0])).main_deps,
-            //         args[1] as string,
-            //         [],
-            //     ),
-            // );
-            // test_body_match()
+            console.log(await parse_mod_details(MOD_BASE_DIR + "/" + "gregtech-5.09.52.526-git.1+dcb1a7eb3c-dirty.jar"))
         },
     },
 };

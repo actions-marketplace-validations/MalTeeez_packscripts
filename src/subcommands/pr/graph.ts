@@ -272,6 +272,7 @@ export async function find_merged_prs_since_daily(
 
     // Find the daily baseline version - either from CI_INTEGRATION override or from mod_map.
     let baseline_version: string | undefined = CI_INTEGRATION?.SOURCE_OVERRIDES?.[repo_key]?.daily_version_override;
+    let baseline_mod: mod_object | undefined;
     if (baseline_version == undefined) {
         const repo_to_mods = build_repo_to_mods(mod_map);
         const mods = repo_to_mods.get(repo_key);
@@ -286,7 +287,7 @@ export async function find_merged_prs_since_daily(
                     `For now this is a hard failure.`,
             };
         }
-        const baseline_mod = pick_baseline_mod(repo_key, mods);
+        baseline_mod = pick_baseline_mod(repo_key, mods);
         baseline_version = baseline_mod?.update_state.version;
     }
     if (baseline_version == undefined) {
@@ -294,7 +295,24 @@ export async function find_merged_prs_since_daily(
     }
 
     // Resolve tag -> commit -> date.
-    const baseline_sha = await resolve_tag_to_sha(repo_url, baseline_version, cache);
+    let baseline_sha = await resolve_tag_to_sha(repo_url, baseline_version, cache);
+    if (baseline_sha == undefined && baseline_mod?.update_state.sha256_sum) {
+        // Tag stored in mod_map not found on GitHub — fall back to digest scan of recent releases.
+        log_debug(`Tag '${baseline_version}' not found in ${repo_key}; falling back to digest scan of recent releases.`);
+        const scan_res = await query_gh_project_by_url(repo_url, `/releases?per_page=50`);
+        if (scan_res.status === '200' && Array.isArray(scan_res.body)) {
+            const sha_sum = baseline_mod.update_state.sha256_sum;
+            const matched_rel = (scan_res.body as any[]).find((rel) =>
+                Array.isArray(rel.assets) &&
+                rel.assets.some((a: any) => typeof a.digest === 'string' && a.digest.slice(7) === sha_sum),
+            );
+            if (matched_rel?.tag_name != undefined) {
+                log_debug(`Digest scan matched release tag '${matched_rel.tag_name}' for ${repo_key}; retrying tag resolution.`);
+                baseline_version = matched_rel.tag_name as string;
+                baseline_sha = await resolve_tag_to_sha(repo_url, baseline_version, cache);
+            }
+        }
+    }
     if (baseline_sha == undefined) {
         return { ok: false, reason: 'daily_baseline_unknown', detail: `Could not resolve tag '${baseline_version}' to a commit in ${repo_key}.` };
     }

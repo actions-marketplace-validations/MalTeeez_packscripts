@@ -1,5 +1,15 @@
 import { ANNOTATED_FILE, MOD_BASE_DIR } from './config';
-import { extract_file_from_zip, extract_text_from_zip, hash_file, is_folder_locked, read_from_file, rename_file, save_map_to_file, scan_mods_folder, search_zip_for_string } from './fs';
+import {
+    extract_file_from_zip,
+    extract_text_from_zip,
+    hash_file,
+    is_folder_locked,
+    read_from_file,
+    rename_file,
+    save_map_to_file,
+    scan_mods_folder,
+    search_zip_for_string,
+} from './fs';
 import { dedup_array, type JsonObject } from './utils';
 
 //#region types
@@ -348,6 +358,64 @@ export async function disable_all_mods(mod_map?: Map<string, mod_object>) {
     }
 }
 
+export function parse_mod_filename(file_path: string) {
+    let s = file_path
+        .replace(/^.*\//, '') // strip path
+        .replace(/\.jar(?:\.disabled)?$/, '') // strip extension
+        .replace(/^(?:\[[A-Za-z\d]+\]|[-+\d.])+/, '') // strip leading [TAG], +, -, digits
+        .replace(/\[[^\]]*\]/g, ''); // strip all [bracket] groups
+
+    // Split on MC version — everything before is name+modver, after is noise
+    const mc_match = /[-+_ .]*(?:mc)?1\.7\.10[-+_ .]*/gi.exec(s);
+    const before_mc = mc_match ? s.slice(0, mc_match.index) : s;
+    const after_mc = mc_match ? s.slice(mc_match.index + mc_match[0].length) : '';
+
+    // A version-start token: digit, v/V+digit, or git hash (7+ hex chars)
+    const VERSION_TOKEN = /^(v?\d|[0-9a-f]{7,}\b)/i;
+
+    // Tokenize before_mc and find first separator+token that looks like a version
+    const parts = before_mc.split(/([-+_. ]+)/);
+    let name = parts[0];
+    let version = '';
+
+    for (let i = 1; i < parts.length; i += 2) {
+        const tok = parts[i + 1] || '';
+        if (VERSION_TOKEN.test(tok)) {
+            version = parts.slice(i + 1).join('');
+            break;
+        }
+        name += parts[i] + tok;
+    }
+
+    // No version before MC? Look after it (e.g. BetterFoliage-MC1.7.10-2.0.17)
+    if (!version && after_mc) {
+        const after_parts = after_mc.split(/([-+_. ]+)/);
+        let found = false;
+        for (let i = 0; i < after_parts.length; i += 2) {
+            if (!found && after_parts[i] != undefined && VERSION_TOKEN.test(after_parts[i]!)) found = true;
+            if (found) version += (after_parts[i - 1] ?? '') + after_parts[i];
+        }
+    }
+
+    // Still nothing? Check for alpha-style version in after_mc: V33a, V33b
+    if (!version && after_mc) {
+        const m = after_mc.match(/^[Vv]\d+\w*/);
+        if (m) version = m[0];
+    }
+
+    // Special case: version was entirely in [brackets] that got stripped
+    // Try to recover it from the original string
+    if (!version) {
+        const bracketed = file_path.match(/\[v?([\d][^\]]+)\]/i);
+        if (bracketed && bracketed[1] != undefined) version = bracketed[1]!;
+    }
+
+    return {
+        id: name?.replace(/[-+_. ]+$/, '').trim() || undefined,
+        version: version.replace(/^[-+_. ]+|[-+_. ]+$/g, '') || undefined,
+    };
+}
+
 /**
  * Extract more infos about a list of mods from their contained mcmod.info files (json)
  * @param files A map of mod jars, of type <file path, file basename>, usually returned by scan_mods_folder()
@@ -402,15 +470,7 @@ export async function parse_mod_details(file_path: string): Promise<{
     const mod_state: boolean = !file_path.endsWith('.disabled');
 
     const hash = hash_file(file_path, 'sha256');
-
-    // oh god what have I created. (Filename to modid pattern)
-    // Basically, this first matches the folder path in front of the file. Then it filters out any non word chars in front of the name or a tag group, such as [CLIENT].
-    // Then to mark the start of the name, it looks for a alphanum character,
-    // and from thereout grabs everything (alphanum) OR (a single digit) OR (another part of the name, seperated by + OR - and (starting with 2 alphanum chars OR a i or a for single words))
-    // This stops at a non fitting seperator, such as [,],-,_ or a digit
-    const filename_match = file_path.match(
-        /(?<path>^.*\/)(?<pre>(?:(?:\[[A-Z]+?\])|[\-\[\]\+\d\.])*)(?<middle>(?<first_char>[a-zA-Z])(?:[a-zA-Z]|\d{1}|[\+\-](?:(?!mc|MC)[a-zA-Z]{2}|[aI]))+)[+\-_\.]*(?:mc|MC)?(?<post>\d?.*?)(?:\.jar(?:\.disabled)?)/m,
-    );
+    const filename_match = parse_mod_filename(file_path) 
 
     const info_json: JsonObject | JsonObject[] | string | undefined = await extract_text_from_zip(file_path, 'mcmod.info')
         .then((file_data: string) => {
@@ -418,7 +478,7 @@ export async function parse_mod_details(file_path: string): Promise<{
             try {
                 return JSON.parse(file_data);
             } catch (err) {
-                //console.error("Failed to parse mod info for file ", file_name)
+                // console.error('Failed to parse mod info for file ', file_path, ' with err ', err);
                 if (file_data.length > 0) {
                     return file_data;
                 }
@@ -508,11 +568,16 @@ export async function parse_mod_details(file_path: string): Promise<{
                     ],
                 );
             }
+
             // Mod-Version
             if (info_json.modList[0].version && typeof info_json.modList[0].version === 'string') {
                 mod_version = info_json.modList[0].version;
             }
+        } else {
+            // console.log('thing seems to be malformed');
         }
+    } else {
+        // console.log('thing seems to be very malformed', typeof info_json);
     }
 
     // If the json was existent, but had empty values (was malformed), the mod id might still be undefined
@@ -537,12 +602,10 @@ export async function parse_mod_details(file_path: string): Promise<{
         // Info json was just missing, so we fall back further
     } else if (info_json === undefined || mod_id == undefined) {
         // mod_id is still not found, so we try to extract it from its file name
-        if (filename_match && filename_match.length > 1) {
-            if (filename_match.groups?.middle) {
+            if (filename_match.id) {
                 //console.info("\t ^^ Found id secondary through regex")
-                mod_id = filename_match.groups.middle;
+                mod_id = filename_match.id;
             }
-        }
     }
 
     // Get all info from the @Mod annotation inside the mods main class
@@ -555,16 +618,16 @@ export async function parse_mod_details(file_path: string): Promise<{
     }
     if (mod_version == undefined && main_version) {
         mod_version = main_version;
-    } else if (mod_version == undefined && filename_match && filename_match.length > 1 && filename_match.groups?.post) {
-        mod_version = filename_match.groups.post;
+    } else if (mod_version == undefined && filename_match.version) {
+        mod_version = filename_match.version;
     }
     // Remove 1.7.10 from version if something reasonable remains
     if (mod_version !== undefined) {
-        const possible_version = mod_version.replace(/[-+]?(mc)?1\.7\.10[-+]?/i, '');
+        const possible_version = mod_version.replace(/[-+.]*(?:mc)?(?:1\.7\.10|1710)[-+.]*/i, '');
         if (possible_version.length < mod_version.length && possible_version.length > 1 && possible_version.match(/(\d)/)) {
             mod_version = possible_version;
-        } else if (possible_version.length == 0 && filename_match?.groups?.post) {
-            mod_version = filename_match.groups.post;
+        } else if (possible_version.length == 0 && filename_match.version) {
+            mod_version = filename_match.version;
         }
     }
 
