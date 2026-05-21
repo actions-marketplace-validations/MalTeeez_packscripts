@@ -81,7 +81,7 @@ export interface DepGraph {
 }
 
 export interface BuildOpts {
-    build_job?: string;
+    build_jobs?: string[];
     artifact_name?: string;
     allow_failed_workflows?: boolean;
     allow_external_owners?: boolean;
@@ -383,7 +383,7 @@ export async function find_merged_prs_since_daily(
 
 // DFS-build the dependency graph starting from root_pr_url.
 export async function build_dep_graph(root_pr_url: string, opts: BuildOpts, mod_map: Map<string, mod_object>, cache?: GhCache): Promise<DepGraph> {
-    log_debug(`build_dep_graph: root=${root_pr_url}, skip_artifact_download=${opts.skip_artifact_download ?? false}, build_job=${opts.build_job ?? '<none>'}`);
+    log_debug(`build_dep_graph: root=${root_pr_url}, skip_artifact_download=${opts.skip_artifact_download ?? false}, build_jobs=${opts.build_jobs?.join(',') ?? '<none>'}`);
     cache = cache ?? new_gh_cache();
     const graph: DepGraph = {
         nodes: new Map(),
@@ -555,7 +555,7 @@ async function resolve_node_artifact(node: DepNode, graph: DepGraph, opts: Build
     if (node.pr_meta == undefined) return;
 
     const resolve_res = await resolve_artifact_for_url(node.pr_meta.pr_url, {
-        build_job: opts.build_job,
+        build_jobs: opts.build_jobs,
         artifact_name: opts.artifact_name,
         allow_failed_workflows: opts.allow_failed_workflows,
         wait_timeout_ms: opts.wait_timeout_ms,

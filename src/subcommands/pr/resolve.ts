@@ -41,7 +41,7 @@ export type ResolveResult =
     | { ok: false; reason: ResolveFailureReason; detail: string; link?: string };
 
 export interface ResolveOpts {
-    build_job?: string;
+    build_jobs?: string[];
     artifact_name?: string;
     allow_failed_workflows?: boolean;
     wait_timeout_ms?: number;
@@ -57,8 +57,8 @@ export async function resolve_artifact_for_url(source_url: string, opts?: Resolv
     const url_match = parse_gh_url(source_url);
     if (!url_match) return { ok: false, reason: 'parse_failed', detail: `Failed to parse '${source_url}' as a GitHub URL.` };
 
-    const merged_opts: Required<Omit<ResolveOpts, 'build_job' | 'artifact_name'>> & Pick<ResolveOpts, 'build_job' | 'artifact_name'> = {
-        build_job: opts?.build_job,
+    const merged_opts: Required<Omit<ResolveOpts, 'build_jobs' | 'artifact_name'>> & Pick<ResolveOpts, 'build_jobs' | 'artifact_name'> = {
+        build_jobs: opts?.build_jobs,
         artifact_name: opts?.artifact_name,
         allow_failed_workflows: opts?.allow_failed_workflows ?? false,
         wait_timeout_ms: opts?.wait_timeout_ms ?? 0,
@@ -128,11 +128,13 @@ async function fetch_branch_commit_shas(source_url: string, branch: string, look
 
 // Walk SHAs newest-first, fetching runs per SHA, picking the first non-failed completed run.
 // Honors the wait rule: in-progress runs trigger a wait only when wait_timeout_ms > 0 AND
-// (build_job set OR no other SHA has any runs).
+// (build_jobs set OR no other SHA has any runs).
+// When build_jobs is provided, tries each entry in priority order: uses the first matching run
+// that passed; if the first match failed but a later entry matched and passed, forgives the failure.
 async function pick_run_from_shas(
     source_url: string,
     shas: string[],
-    opts: { allow_failed_workflows: boolean; wait_timeout_ms: number; poll_interval_ms: number; build_job?: string },
+    opts: { allow_failed_workflows: boolean; wait_timeout_ms: number; poll_interval_ms: number; build_jobs?: string[] },
 ): Promise<{ ok: true; run: WorkflowRunSummary; other_runs: WorkflowRunSummary[]; sha: string } | { ok: false; reason: ResolveFailureReason; detail: string; link?: string } | undefined> {
     // First pass - find every SHA that has any runs at all. Used to decide if "first workflow" rule applies.
     const shas_with_runs: Map<string, WorkflowRunSummary[]> = new Map();
@@ -147,32 +149,56 @@ async function pick_run_from_shas(
         const runs = shas_with_runs.get(sha);
         if (runs == undefined) continue;
 
-        // Detect failures first - if any run failed and we don't allow that, abort the whole resolve.
-        const failed = runs.filter((r) => r.conclusion != null && FAILED_WORKFLOW_CONCLUSIONS.includes(r.conclusion));
-        if (failed.length > 0 && !opts.allow_failed_workflows) {
-            const first_failed = failed[0]!;
-            return {
-                ok: false,
-                reason: 'workflow_failed',
-                detail: `Workflow '${first_failed.name}' concluded as ${first_failed.conclusion}.`,
-                link: first_failed.html_url,
-            };
-        }
+        let target: WorkflowRunSummary | undefined;
 
-        // Pick run matching build_job if provided, otherwise the first run.
-        const target = opts.build_job != undefined ? runs.find((r) => r.name.toLowerCase() === opts.build_job!.toLowerCase()) : runs[0];
-        if (target == undefined) continue; // build_job filter missed - try next SHA
+        if (opts.build_jobs != undefined && opts.build_jobs.length > 0) {
+            // Try each job name in priority order. Accept the first match that is not failed.
+            // If an earlier entry matched but failed and a later entry matched and passed, forgive
+            // the failure and use the passing run.
+            let first_failed_match: WorkflowRunSummary | undefined;
+            for (const job_name of opts.build_jobs) {
+                const match = runs.find((r) => r.name.toLowerCase() === job_name.toLowerCase());
+                if (match == undefined) continue;
+                if (match.conclusion != null && FAILED_WORKFLOW_CONCLUSIONS.includes(match.conclusion)) {
+                    if (first_failed_match == undefined) first_failed_match = match;
+                    continue; // try next entry
+                }
+                target = match;
+                break;
+            }
+            if (target == undefined) {
+                if (first_failed_match == undefined) continue; // no entry matched at all - try next SHA
+                if (!opts.allow_failed_workflows) {
+                    return { ok: false, reason: 'workflow_failed', detail: `Workflow '${first_failed_match.name}' concluded as ${first_failed_match.conclusion}.`, link: first_failed_match.html_url };
+                }
+                target = first_failed_match;
+            }
+        } else {
+            // No build_jobs filter: blanket failure check then pick first run.
+            const failed = runs.filter((r) => r.conclusion != null && FAILED_WORKFLOW_CONCLUSIONS.includes(r.conclusion));
+            if (failed.length > 0 && !opts.allow_failed_workflows) {
+                const first_failed = failed[0]!;
+                return {
+                    ok: false,
+                    reason: 'workflow_failed',
+                    detail: `Workflow '${first_failed.name}' concluded as ${first_failed.conclusion}.`,
+                    link: first_failed.html_url,
+                };
+            }
+            target = runs[0];
+            if (target == undefined) continue;
+        }
 
         // If picked run is completed, return it.
         if (target.status === 'completed') {
-            const other_runs = runs.filter((r) => r.id !== target.id);
+            const other_runs = runs.filter((r) => r.id !== target!.id);
             log_step(`Found ${tag_count([target, ...other_runs].length)} workflow(s) on commit ${tag_dim(sha.slice(0, 7))}.`);
             return { ok: true, run: target, other_runs, sha };
         }
 
         // Picked run is in-progress. Check if we should wait.
         const is_first_workflow = shas_with_runs.size === 1;
-        const should_wait = opts.wait_timeout_ms > 0 && (opts.build_job != undefined || is_first_workflow);
+        const should_wait = opts.wait_timeout_ms > 0 && ((opts.build_jobs != undefined && opts.build_jobs.length > 0) || is_first_workflow);
         if (should_wait) {
             log_step(`Workflow ${tag_primary(target.name)} is in progress, waiting up to ${tag_count(Math.floor(opts.wait_timeout_ms / 1000))}s...`);
             const wait_res = await wait_for_workflow_run(source_url, target.id, { timeout_ms: opts.wait_timeout_ms, poll_interval_ms: opts.poll_interval_ms });
@@ -180,7 +206,7 @@ async function pick_run_from_shas(
             if (FAILED_WORKFLOW_CONCLUSIONS.includes(wait_res.conclusion) && !opts.allow_failed_workflows) {
                 return { ok: false, reason: 'workflow_failed', detail: `Workflow '${target.name}' concluded as ${wait_res.conclusion}.`, link: wait_res.html_url };
             }
-            const other_runs = runs.filter((r) => r.id !== target.id);
+            const other_runs = runs.filter((r) => r.id !== target!.id);
             return { ok: true, run: { ...target, status: 'completed', conclusion: wait_res.conclusion }, other_runs, sha };
         }
         // Fall through to next-older SHA.
@@ -231,7 +257,7 @@ export async function wait_for_workflow_run(
 async function resolve_from_run_id(
     source_url: string,
     run_id: string,
-    opts: { build_job?: string; artifact_name?: string; allow_failed_workflows: boolean; wait_timeout_ms: number; poll_interval_ms: number },
+    opts: { build_jobs?: string[]; artifact_name?: string; allow_failed_workflows: boolean; wait_timeout_ms: number; poll_interval_ms: number },
 ): Promise<ResolveResult> {
     // Fetch run metadata to know its name and current conclusion.
     const { status, body } = await query_gh_project_by_url(source_url, `/actions/runs/${run_id}`);
@@ -254,7 +280,7 @@ async function select_artifact_from_workflow(
     run: WorkflowRunSummary,
     other_runs: WorkflowRunSummary[],
     resolved_sha: string,
-    opts: { build_job?: string; artifact_name?: string; allow_failed_workflows: boolean },
+    opts: { build_jobs?: string[]; artifact_name?: string; allow_failed_workflows: boolean },
 ): Promise<ResolveResult> {
     // If picked run failed and we don't tolerate that, return.
     if (run.conclusion != null && FAILED_WORKFLOW_CONCLUSIONS.includes(run.conclusion) && !opts.allow_failed_workflows) {
@@ -269,8 +295,8 @@ async function select_artifact_from_workflow(
         const artifacts = await fetch_artifacts_for_run(source_url, wf.id);
         const usable = artifacts.filter((a) => !a.expired).map((arti) => { return { artifact: arti, src_run: wf }});
 
-        // If build_job filter matches this workflow, use it exclusively (skip the other workflows).
-        if (opts.build_job != undefined && wf.name.toLowerCase() === opts.build_job.toLowerCase()) {
+        // If any build_jobs entry matches this workflow, use it exclusively (skip the other workflows).
+        if (opts.build_jobs != undefined && opts.build_jobs.some((j) => j.toLowerCase() === wf.name.toLowerCase())) {
             collected = usable;
             break;
         }

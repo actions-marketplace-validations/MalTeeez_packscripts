@@ -18,7 +18,7 @@ export async function get_dl_url_from_github_url(
     allow_failed_workflows: boolean = false,
 ): Promise<Artifact | undefined> {
     const res = await resolve_artifact_for_url(source_url, {
-        build_job,
+        build_jobs: build_job != undefined ? [build_job] : undefined,
         artifact_name,
         allow_failed_workflows,
         commit_lookback,
@@ -30,7 +30,7 @@ export async function get_dl_url_from_github_url(
 
 export interface ApplyOptions {
     dry: boolean;
-    build_job?: string;
+    build_jobs?: string[];
     artifact_name?: string;
     allow_failed_workflows?: boolean;
     allow_external_owners?: boolean;
@@ -50,7 +50,7 @@ export async function apply_github_pr(source_url: string | undefined, options: A
     const cache = new_gh_cache();
 
     const build_opts: BuildOpts = {
-        build_job: options.build_job,
+        build_jobs: options.build_jobs,
         artifact_name: options.artifact_name,
         allow_failed_workflows: options.allow_failed_workflows,
         allow_external_owners: options.allow_external_owners,
@@ -143,7 +143,7 @@ export async function apply_github_pr(source_url: string | undefined, options: A
 export interface GateOptions {
     allow_external_owners?: boolean;
     other_allowed_owners?: string[];
-    build_job?: string;
+    build_jobs?: string[];
 }
 
 const GATE_PASS_STATES: ReadonlySet<PRStateKind | 'default_commit'> = new Set(['merged_with_release']);
@@ -157,12 +157,12 @@ export async function pr_gate(source_url: string | undefined, options: GateOptio
         return;
     }
     assert_gh_key();
-    log_debug(`Gate options: build_job=${options.build_job ?? '<none>'}, allow_external_owners=${options.allow_external_owners ?? false}, other_allowed_owners=[${(options.other_allowed_owners ?? []).join(', ')}]`);
+    log_debug(`Gate options: build_jobs=${(options.build_jobs ?? []).join(',') || '<none>'}, allow_external_owners=${options.allow_external_owners ?? false}, other_allowed_owners=[${(options.other_allowed_owners ?? []).join(', ')}]`);
     const mod_map = await read_saved_mods(ANNOTATED_FILE);
     const cache = new_gh_cache();
 
     const graph = await build_dep_graph(source_url, {
-        build_job: options.build_job,
+        build_jobs: options.build_jobs,
         allow_external_owners: options.allow_external_owners,
         other_allowed_owners: options.other_allowed_owners,
         skip_artifact_download: true,

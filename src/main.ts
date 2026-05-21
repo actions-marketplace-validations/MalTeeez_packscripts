@@ -521,7 +521,7 @@ const commands: Record<string, CommandDefinition> = {
     },
     pr_apply: {
         description: 'Fetch and apply a mod build artifact from a GitHub PR, recursively resolving cross-repo deps and merged-since-daily PRs',
-        usage: 'pr apply <pr_url> [--dry] [--build_job <name>] [--artifact_name <part>] [--allow_failed_workflows] [--allow_external_owners] [--other_allowed_owner <owner>]... [--wait_timeout <seconds>] [--poll_interval <seconds>] [--debug]',
+        usage: 'pr apply <pr_url> [--dry] [--build_job <name>]... [--artifact_name <part>] [--allow_failed_workflows] [--allow_external_owners] [--other_allowed_owner <owner>]... [--wait_timeout <seconds>] [--poll_interval <seconds>] [--debug]',
         is_subcommand: true,
         handler: async (args) => {
             if (args.includes('--help') || args.includes('-h')) {
@@ -530,16 +530,16 @@ const commands: Record<string, CommandDefinition> = {
             }
 
             // Parse value-flags first, then collect positionals.
-            let build_job: string | undefined;
             let artifact_name: string | undefined;
             let wait_timeout_seconds: number | undefined;
             let poll_interval_seconds: number | undefined;
+            const build_jobs: string[] = [];
             const other_allowed_owners: string[] = [];
             const positional: string[] = [];
             for (let i = 0; i < args.length; i++) {
                 const arg = args[i];
                 if (arg === '--build_job' && args[i + 1] != undefined) {
-                    build_job = args[++i];
+                    build_jobs.push(args[++i] as string);
                 } else if (arg === '--artifact_name' && args[i + 1] != undefined) {
                     artifact_name = args[++i];
                 } else if (arg === '--other_allowed_owner' && args[i + 1] != undefined) {
@@ -559,7 +559,7 @@ const commands: Record<string, CommandDefinition> = {
 
             await apply_github_pr(positional[0], {
                 dry: args.includes('--dry'),
-                build_job,
+                build_jobs: build_jobs.length > 0 ? build_jobs : undefined,
                 artifact_name,
                 allow_failed_workflows: args.includes('--allow_failed_workflows'),
                 allow_external_owners: args.includes('--allow_external_owners'),
@@ -572,7 +572,7 @@ const commands: Record<string, CommandDefinition> = {
     },
     pr_gate: {
         description: 'Validate every cross-repo dep of the given PR is merged with a published release; exit 0 = mergeable',
-        usage: 'pr gate <pr_url> [--allow_external_owners] [--other_allowed_owner <owner>]... [--build_job <name>] [--debug]',
+        usage: 'pr gate <pr_url> [--allow_external_owners] [--other_allowed_owner <owner>]... [--build_job <name>]... [--debug]',
         is_subcommand: true,
         handler: async (args) => {
             if (args.includes('--help') || args.includes('-h')) {
@@ -580,13 +580,13 @@ const commands: Record<string, CommandDefinition> = {
                 return;
             }
 
-            let build_job: string | undefined;
+            const build_jobs: string[] = [];
             const other_allowed_owners: string[] = [];
             const positional: string[] = [];
             for (let i = 0; i < args.length; i++) {
                 const arg = args[i];
                 if (arg === '--build_job' && args[i + 1] != undefined) {
-                    build_job = args[++i];
+                    build_jobs.push(args[++i] as string);
                 } else if (arg === '--other_allowed_owner' && args[i + 1] != undefined) {
                     other_allowed_owners.push(args[++i] as string);
                 } else if (arg != null && !arg.startsWith('-')) {
@@ -595,7 +595,7 @@ const commands: Record<string, CommandDefinition> = {
             }
 
             await pr_gate(positional[0], {
-                build_job,
+                build_jobs: build_jobs.length > 0 ? build_jobs : undefined,
                 allow_external_owners: args.includes('--allow_external_owners'),
                 other_allowed_owners: other_allowed_owners.length > 0 ? other_allowed_owners : undefined,
             });
@@ -604,7 +604,7 @@ const commands: Record<string, CommandDefinition> = {
     },
     pr_deps: {
         description: 'Download direct dependencies of a PR and build a JSON metadata manifest',
-        usage: 'pr deps <pr_url> --target_dir <dir> --jar_suffix <suffix> [--build_job <name>] [--allow_external_owners] [--other_allowed_owner <owner>]... [--debug]',
+        usage: 'pr deps <pr_url> --target_dir <dir> --jar_suffix <suffix> [--dry] [--build_job <name>]... [--allow_external_owners] [--other_allowed_owner <owner>]... [--debug]',
         is_subcommand: true,
         handler: async (args) => {
             if (args.includes('--help') || args.includes('-h')) {
@@ -614,7 +614,7 @@ const commands: Record<string, CommandDefinition> = {
 
             let target_dir: string | undefined;
             let jar_suffix: string | undefined;
-            let build_job: string | undefined;
+            const build_jobs: string[] = [];
             const other_allowed_owners: string[] = [];
             const positional: string[] = [];
 
@@ -625,18 +625,12 @@ const commands: Record<string, CommandDefinition> = {
                 } else if (arg === '--jar_suffix' && args[i + 1] != undefined) {
                     jar_suffix = args[++i];
                 } else if (arg === '--build_job' && args[i + 1] != undefined) {
-                    build_job = args[++i];
+                    build_jobs.push(args[++i] as string);
                 } else if (arg === '--other_allowed_owner' && args[i + 1] != undefined) {
                     other_allowed_owners.push(args[++i] as string);
                 } else if (arg != null && !arg.startsWith('-')) {
                     positional.push(arg);
                 }
-            }
-
-            if (!positional[0]) {
-                console.error('Error: Missing PR URL.');
-                console.log(commands['pr_deps']?.usage);
-                process.exit(1);
             }
 
             if (!target_dir) {
@@ -654,7 +648,8 @@ const commands: Record<string, CommandDefinition> = {
             await pr_deps(positional[0], {
                 target_dir,
                 jar_suffix,
-                build_job,
+                dry: args.includes('--dry'),
+                build_jobs: build_jobs.length > 0 ? build_jobs : undefined,
                 allow_external_owners: args.includes('--allow_external_owners'),
                 other_allowed_owners: other_allowed_owners.length > 0 ? other_allowed_owners : undefined,
             });

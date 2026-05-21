@@ -16,7 +16,8 @@ import {
 import { extract_required_prs, parse_gh_url } from '../../utils/sources';
 import { hash_buffer } from '../../utils/utils';
 import { preflight_same_repo_dep } from './preflight';
-import { fetch_pr_meta, new_gh_cache, type GhCache, type PRMeta } from './graph';
+import { fetch_pr_meta, new_gh_cache, classify_pr_state, find_merged_prs_since_daily, read_mod_map, type GhCache, type PRMeta } from './graph';
+import { type mod_object } from '../../utils/mods';
 import { resolve_artifact_for_url, verify_uncertain_refs, type Artifact } from './resolve';
 import { mkdir, rm } from 'node:fs/promises';
 import path from 'node:path';
@@ -24,7 +25,8 @@ import path from 'node:path';
 export interface DepsOptions {
     target_dir: string;
     jar_suffix: string;
-    build_job?: string;
+    dry?: boolean;
+    build_jobs?: string[];
     artifact_name?: string;
     allow_failed_workflows?: boolean;
     allow_external_owners?: boolean;
@@ -76,9 +78,30 @@ export async function pr_deps(source_url: string | undefined, options: DepsOptio
         return;
     }
 
+    // Phase 1.5: drop deps already covered by the daily baseline (merged_with_release at or before daily).
+    const mod_map = await read_mod_map();
+    const filtered_dep_urls = await filter_deps_already_in_daily(selected_dep_urls, mod_map, cache);
+    if (filtered_dep_urls.length === 0) {
+        log_ok('All cross-repo dependency PRs are already covered by the daily baseline.');
+        return;
+    }
+
     // Phase 2: resolve artifacts for every selected dep upfront. Collect all failures so a CI viewer
     // sees the full picture rather than stopping at the first miss.
-    const resolved_deps = await resolve_all_dep_artifacts(selected_dep_urls, root_pr_meta, options);
+    const resolved_deps = await resolve_all_dep_artifacts(filtered_dep_urls, root_pr_meta, options);
+
+    if (options.dry) {
+        const dry_manifest = {
+            dependencies: resolved_deps.map((dep) => ({
+                artifact_name: dep.artifact.name,
+                repo_url: `https://github.com/${dep.owner}/${dep.project}`,
+                commit_sha: dep.resolved_sha,
+                pr_url: dep.dep_url,
+            })),
+        };
+        console.log(JSON.stringify(dry_manifest, null, 4));
+        return;
+    }
 
     // Phase 3: download zips, verify integrity, extract jars, write manifest.
     await download_and_emit_manifest(resolved_deps, options);
@@ -204,6 +227,43 @@ async function resolve_default_branch(repo_key: string, sample_url: string, cach
         ?? 'main';
 }
 
+//#region Phase 1.5: filter deps already in daily
+
+// Returns the subset of dep_urls that are NOT already covered by the daily baseline.
+// A dep is considered covered when it is merged_with_release AND its PR number does not appear in
+// the merged-since-daily list (meaning it was merged at or before the baseline commit).
+// Safe default: if the baseline is unknown for a repo, keep the dep.
+async function filter_deps_already_in_daily(dep_urls: string[], mod_map: Map<string, mod_object>, cache: GhCache): Promise<string[]> {
+    const kept: string[] = [];
+    for (const dep_url of dep_urls) {
+        const parsed = parse_gh_url(dep_url)!;
+        const pr_id = `${parsed.owner}/${parsed.project}#${parsed.secondary}`;
+
+        const classified = await classify_pr_state(dep_url, cache);
+        if (classified == undefined || classified.state !== 'merged_with_release') {
+            kept.push(dep_url);
+            continue;
+        }
+
+        const since_daily = await find_merged_prs_since_daily(parsed.owner, parsed.project, mod_map, cache);
+        if (!since_daily.ok) {
+            log_debug(`Cannot determine daily baseline for ${parsed.owner}/${parsed.project}; keeping dep ${pr_id}.`);
+            kept.push(dep_url);
+            continue;
+        }
+
+        const pr_number = Number(parsed.secondary);
+        const merged_after_baseline = since_daily.merged_prs.some((mpr) => mpr.pr_number === pr_number);
+        if (!merged_after_baseline) {
+            log_info(`Skipping ${tag_primary(pr_id)}: already merged with release ${tag_dim(classified.release_tag ?? '?')} at or before the daily baseline ${tag_dim(since_daily.daily_version)}.`);
+            continue;
+        }
+
+        kept.push(dep_url);
+    }
+    return kept;
+}
+
 //#region Phase 2: resolve artifacts
 
 // Resolve artifacts for every selected dep upfront. Collects all failures and surfaces them via
@@ -214,9 +274,9 @@ async function resolve_all_dep_artifacts(dep_urls: string[], root_pr_meta: PRMet
     for (const dep_url of dep_urls) {
         const parsed = parse_gh_url(dep_url)!;
         const pr_id = `${parsed.owner}/${parsed.project}#${parsed.secondary}`;
-        log_info(`Resolving artifact for dependency PR ${tag_primary(pr_id)} ${tag_dim(`(${dep_url})`)}...`);
+        log_debug(`Resolving artifact for dependency PR ${tag_primary(pr_id)} ${tag_dim(`(${dep_url})`)}...`);
         const res = await resolve_artifact_for_url(dep_url, {
-            build_job: options.build_job,
+            build_jobs: options.build_jobs,
             artifact_name: options.artifact_name,
             allow_failed_workflows: options.allow_failed_workflows,
         });
