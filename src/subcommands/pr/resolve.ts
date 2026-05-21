@@ -157,13 +157,30 @@ async function pick_run_from_shas(
             // the failure and use the passing run.
             let first_failed_match: WorkflowRunSummary | undefined;
             for (const job_name of opts.build_jobs) {
-                const match = runs.find((r) => r.name.toLowerCase() === job_name.toLowerCase());
-                if (match == undefined) continue;
-                if (match.conclusion != null && FAILED_WORKFLOW_CONCLUSIONS.includes(match.conclusion)) {
-                    if (first_failed_match == undefined) first_failed_match = match;
+                const matches = runs
+                    .filter((r) => r.name.toLowerCase() === job_name.toLowerCase())
+                    .sort((a, b) => a.id - b.id); // ascending: oldest first, newest last
+                if (matches.length === 0) continue;
+
+                const last = matches.at(-1)!;
+
+                // Re-trigger: ≥1 older run with this name failed AND the newest succeeded → use newest.
+                if (
+                    matches.length > 1 &&
+                    matches.slice(0, -1).some((r) => r.conclusion != null && FAILED_WORKFLOW_CONCLUSIONS.includes(r.conclusion)) &&
+                    last.conclusion != null &&
+                    !FAILED_WORKFLOW_CONCLUSIONS.includes(last.conclusion)
+                ) {
+                    target = last;
+                    break;
+                }
+
+                // Fallback: treat newest (last in ascending sort = first in GitHub's response) as single candidate.
+                if (last.conclusion != null && FAILED_WORKFLOW_CONCLUSIONS.includes(last.conclusion)) {
+                    if (first_failed_match == undefined) first_failed_match = last;
                     continue; // try next entry
                 }
-                target = match;
+                target = last;
                 break;
             }
             if (target == undefined) {
