@@ -2,6 +2,10 @@ name: Run packscripts
 description: Download and run a packscripts command in CI
 author: MalTeeez
 
+branding:
+  icon: package
+  color: blue
+
 inputs:
   command:
     description: packscripts command to run (e.g. "pr gate ${{ github.event.pull_request.html_url }}")
