@@ -25,6 +25,7 @@ import { assert_config_exists, CI_INTEGRATION, MOD_BASE_DIR } from './utils/conf
 import { init_config } from './subcommands/init';
 import { apply_github_pr, pr_gate } from './subcommands/pr';
 import { set_debug_enabled } from './utils/log';
+import { pr_deps } from './subcommands/pr/deps';
 
 //#region Command Framework
 interface CommandDefinition {
@@ -498,7 +499,7 @@ const commands: Record<string, CommandDefinition> = {
     },
     pr: {
         description: 'Apply or validate PR dependency chains',
-        usage: 'pr <apply|gate>',
+        usage: 'pr <apply|gate|deps>',
         handler: async (args) => {
             const mode = args[0]?.toLowerCase();
             const cmd_args = args.slice(1);
@@ -594,6 +595,65 @@ const commands: Record<string, CommandDefinition> = {
             }
 
             await pr_gate(positional[0], {
+                build_job,
+                allow_external_owners: args.includes('--allow_external_owners'),
+                other_allowed_owners: other_allowed_owners.length > 0 ? other_allowed_owners : undefined,
+            });
+            return;
+        },
+    },
+    pr_deps: {
+        description: 'Download direct dependencies of a PR and build a JSON metadata manifest',
+        usage: 'pr deps <pr_url> --target_dir <dir> --jar_suffix <suffix> [--build_job <name>] [--allow_external_owners] [--other_allowed_owner <owner>]... [--debug]',
+        is_subcommand: true,
+        handler: async (args) => {
+            if (args.includes('--help') || args.includes('-h')) {
+                console.log(commands['pr_deps']?.usage);
+                return;
+            }
+
+            let target_dir: string | undefined;
+            let jar_suffix: string | undefined;
+            let build_job: string | undefined;
+            const other_allowed_owners: string[] = [];
+            const positional: string[] = [];
+
+            for (let i = 0; i < args.length; i++) {
+                const arg = args[i];
+                if (arg === '--target_dir' && args[i + 1] != undefined) {
+                    target_dir = args[++i];
+                } else if (arg === '--jar_suffix' && args[i + 1] != undefined) {
+                    jar_suffix = args[++i];
+                } else if (arg === '--build_job' && args[i + 1] != undefined) {
+                    build_job = args[++i];
+                } else if (arg === '--other_allowed_owner' && args[i + 1] != undefined) {
+                    other_allowed_owners.push(args[++i] as string);
+                } else if (arg != null && !arg.startsWith('-')) {
+                    positional.push(arg);
+                }
+            }
+
+            if (!positional[0]) {
+                console.error('Error: Missing PR URL.');
+                console.log(commands['pr_deps']?.usage);
+                process.exit(1);
+            }
+
+            if (!target_dir) {
+                console.error('Error: Missing required flag --target_dir');
+                console.log(commands['pr_deps']?.usage);
+                process.exit(1);
+            }
+
+            if (!jar_suffix) {
+                console.error('Error: Missing required flag --jar_suffix');
+                console.log(commands['pr_deps']?.usage);
+                process.exit(1);
+            }
+
+            await pr_deps(positional[0], {
+                target_dir,
+                jar_suffix,
                 build_job,
                 allow_external_owners: args.includes('--allow_external_owners'),
                 other_allowed_owners: other_allowed_owners.length > 0 ? other_allowed_owners : undefined,

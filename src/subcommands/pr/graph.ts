@@ -94,7 +94,7 @@ export interface BuildOpts {
 //#region PR metadata fetch + classify
 
 // Fetch and cache the PR object for a given URL, returning a normalized PRMeta.
-async function fetch_pr_meta(pr_url: string, cache: GhCache): Promise<PRMeta | undefined> {
+export async function fetch_pr_meta(pr_url: string, cache: GhCache): Promise<PRMeta | undefined> {
     const parsed = parse_gh_url(pr_url);
     if (!parsed || parsed.primary !== 'pull' || parsed.secondary == undefined) return undefined;
     const { owner, project } = parsed;
