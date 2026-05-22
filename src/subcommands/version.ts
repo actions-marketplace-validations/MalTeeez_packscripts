@@ -16,7 +16,7 @@ import { mkdir, rename, rm } from 'node:fs/promises';
 import { toNamespacedPath } from 'node:path';
 import { parse_gh_url } from '../utils/sources';
 import { get_dl_url_from_github_url, type Artifact } from './pr';
-import { log_debug, log_info, log_ok, log_step, tag_bracket, tag_neutral, tag_primary } from '../utils/log';
+import { log_debug, log_err, log_info, log_ok, log_step, log_warn, tag_bracket, tag_count, tag_dim, tag_neutral, tag_primary } from '../utils/log';
 
 interface ReleaseAsset {
     url: string;
@@ -675,7 +675,7 @@ export async function switch_to_indev_version(
 ) {
     // Initial assertions
     if (source_url == undefined) {
-        console.error(`${CLIColor.FgRed10}ERR:${CLIColor.Reset} Missing source url.`);
+        log_err('Missing source url.');
         return;
     }
     assert_gh_key();
@@ -684,23 +684,15 @@ export async function switch_to_indev_version(
     const url_match = parse_gh_url(source_url);
     const artifact = await get_dl_url_from_github_url(source_url, options.build_job, options.artifact_name, 10, options.allow_failed_workflows ?? false);
     if (artifact == undefined || url_match == undefined || url_match.primary == undefined) {
-        console.error(
-            `${CLIColor.FgRed10}ERR:${CLIColor.Reset} Failed to find a download url from source url ${CLIColor.FgGray}'${CLIColor.FgGray18}${source_url}${CLIColor.FgGray}'${CLIColor.Reset}.`,
-        );
+        log_err(`Failed to find a download url from source url ${tag_bracket(source_url)}.`);
         throw Error();
     } else {
-        console.info(
-            `Using artifact ${CLIColor.BgBlue0}${CLIColor.FgWhite1}${CLIColor.Bright} ${artifact.name} ${CLIColor.Reset} ` +
-                `${CLIColor.FgGray}(${CLIColor.FgGray18}${(artifact.size_in_bytes / 1024).toFixed(0)} ${CLIColor.FgGray14}KB${CLIColor.FgGray}, ` +
-                `${CLIColor.FgGray18}${artifact.digest.slice(0, 12)}…${CLIColor.FgGray})${CLIColor.Reset}`,
-        );
+        log_info(`Using artifact ${tag_primary(artifact.name)} ${tag_bracket(`${(artifact.size_in_bytes / 1024).toFixed(0)} KB, ${artifact.digest.slice(0, 12)}…`)}`);
     }
 
     let { owner, project, primary, secondary, key, asset, fifth } = url_match;
     const pr_id = `${owner}/${project}/${primary}/${secondary}`;
-    console.info(
-        `${CLIColor.FgGray}-${CLIColor.Reset} Applying Artifact from ${CLIColor.BgBlue0}${CLIColor.FgWhite1}${CLIColor.Bright} ${pr_id} ${CLIColor.Reset}${CLIColor.FgGray}...${CLIColor.Reset}`,
-    );
+    log_step(`Applying Artifact from ${tag_primary(pr_id)}...`);
 
     if (options.dry) return;
 
@@ -716,36 +708,30 @@ export async function apply_github_artifact(
 
     const temp_dir = DOWNLOAD_TEMP_DIR.replace(/\/$/m, '') + '/indev';
     if (path_is_directory(temp_dir)) {
-        log_info(`Old temp dir at ${CLIColor.FgGray}(${CLIColor.FgGray18}${temp_dir}${CLIColor.FgGray})${CLIColor.Reset} exists, recreating..`);
+        log_info(`Old temp dir at ${tag_bracket(temp_dir)} exists, recreating..`);
         await rm(temp_dir, { recursive: true });
     }
 
     await mkdir(temp_dir, { recursive: true });
 
     // Actually download the artifact, should always be a zip
-    console.info(`${CLIColor.FgGray}-${CLIColor.Reset} Downloading artifact${CLIColor.FgGray}...${CLIColor.Reset}`);
+    log_step('Downloading artifact...');
     await download_file(artifact.archive_download_url, 'GITHUB', temp_dir, artifact.name + '.zip', SOURCE_API_KEYS.get('GITHUB'));
     const zip_file_name = temp_dir + '/' + artifact.name + '.zip';
     const file = Bun.file(zip_file_name);
 
     // Check integrity of file
     if (!(await file.exists())) {
-        console.error(`${CLIColor.FgRed10}ERR:${CLIColor.Reset} Failed to download file, is on disk missing.`, file);
+        log_err(`Failed to download file, is on disk missing: ${zip_file_name}`);
         return;
     } else if (file.size != artifact.size_in_bytes) {
-        console.error(
-            `${CLIColor.FgRed10}ERR:${CLIColor.Reset} Size of downloaded file differs, got ` +
-                `${CLIColor.Bright}${file.size}${CLIColor.Reset} against expected ${CLIColor.Bright}${artifact.size_in_bytes}${CLIColor.Reset}.`,
-        );
+        log_err(`Size of downloaded file differs, got ${tag_count(file.size)} against expected ${tag_count(artifact.size_in_bytes)}.`);
         return;
     } else if ((await hash_buffer(await file.bytes(), 'sha256')) !== artifact.digest) {
-        console.error(
-            `${CLIColor.FgRed10}ERR:${CLIColor.Reset} Checksum of file differs, got ` +
-                `${CLIColor.Bright}${await hash_buffer(await file.bytes(), 'sha256')}${CLIColor.Reset} against expected ${CLIColor.Bright}${artifact.digest}${CLIColor.Reset}.`,
-        );
+        log_err(`Checksum of file differs, got ${tag_dim(await hash_buffer(await file.bytes(), 'sha256'))} against expected ${tag_dim(artifact.digest)}.`);
         return;
     } else if (!(await is_zip_file(file))) {
-        console.error(`${CLIColor.FgRed10}ERR:${CLIColor.Reset} Downloaded file matches expected but is not a zip file. We can only handle zip files for now.`);
+        log_err('Downloaded file matches expected but is not a zip file. We can only handle zip files for now.');
         return;
     } else {
         log_step(`Downloaded artifact zip ${tag_primary(artifact.name + ".zip")}`)
@@ -756,19 +742,17 @@ export async function apply_github_artifact(
     const filtered_jar_files = jar_files.filter((file_in_zip) => !is_mod_ignored_by_name(file_in_zip.replace(/(?:.*?)([^\/]+?$)/, '$1')));
 
     if (filtered_jar_files.length > 1) {
-        console.error(`${CLIColor.FgRed10}ERR:${CLIColor.Reset} Zip contains more than one file after filtering. Remaining:`, filtered_jar_files);
+        log_err(`Zip contains more than one file after filtering. Remaining: ${filtered_jar_files.join(', ')}`);
         return;
     } else if (filtered_jar_files.length < 1) {
-        console.error(`${CLIColor.FgRed10}ERR:${CLIColor.Reset} Zip contains no .jar files that we want / expected.`);
+        log_err('Zip contains no .jar files that we want / expected.');
         return;
     }
 
     const jar_file = (filtered_jar_files[0] as string).replace(/(?:.*?)([^\/]+?$)/, '$1');
     const jar_file_path = temp_dir + '/' + jar_file;
     await Bun.write(jar_file_path, await extract_file_from_zip(zip_file_name, filtered_jar_files[0] as string));
-    console.info(
-        `${CLIColor.FgGray}-${CLIColor.Reset} Extracted mod jar from zip to ${CLIColor.FgGray}(${CLIColor.FgGray18}${jar_file_path}${CLIColor.FgGray})${CLIColor.Reset}`,
-    );
+    log_step(`Extracted mod jar from zip to ${tag_bracket(jar_file_path)}`);
 
     // Check modid of jar for switching out with existing version
     const { id: mod_id, version: mod_version, wants: mod_wants, hash: mod_hash, other_mod_ids: mod_other_ids } = await parse_mod_details(jar_file_path);
@@ -776,7 +760,7 @@ export async function apply_github_artifact(
 
     // Jar could not be recognized as a mod, add it as something unknown
     if (mod_id == undefined) {
-        console.warn(`${CLIColor.FgYellow1}WARN:${CLIColor.Reset} Failed to get an id from mod jar, directly moving to mod folder and exiting.`);
+        log_warn('Failed to get an id from mod jar, directly moving to mod folder and exiting.');
         await rename_file(jar_file_path, jar_mod_path);
         return;
     }
@@ -794,17 +778,17 @@ export async function apply_github_artifact(
         if (await old_jar.exists()) {
             await old_jar.delete();
         } else {
-            console.warn(`${CLIColor.FgYellow1}WARN:${CLIColor.Reset} Old jar is missing, skipping deletion.`);
+            log_warn('Old jar is missing, skipping deletion.');
         }
 
         // If mod was previously disabled, also disable it here
         if (!mod_obj.enabled) {
             jar_mod_path += '.disabled';
-            console.warn(`${CLIColor.FgYellow1}WARN:${CLIColor.Reset} Mod was previously disabled, also disabling it now.`);
+            log_warn('Mod was previously disabled, also disabling it now.');
         }
 
         await rename_file(jar_file_path, jar_mod_path);
-        console.info(`${CLIColor.FgGray}-${CLIColor.Reset} Moved indev jar to mods folder, updating track entry${CLIColor.FgGray}...${CLIColor.Reset}`);
+        log_step('Moved indev jar to mods folder, updating track entry...');
 
         mod_obj.file_path = jar_mod_path;
         mod_obj.update_state.version = mod_version ?? mod_obj.version + '-dirty';
@@ -816,7 +800,7 @@ export async function apply_github_artifact(
         );
 
         await rename_file(jar_file_path, jar_mod_path);
-        console.info(`${CLIColor.FgGray}-${CLIColor.Reset} Moved indev jar to mods folder, adding track entry${CLIColor.FgGray}...${CLIColor.Reset}`);
+        log_step('Moved indev jar to mods folder, adding track entry...');
 
         const new_mod_obj = clone(default_mod_object) as mod_object;
         new_mod_obj.file_path = jar_mod_path;

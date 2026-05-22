@@ -3,6 +3,8 @@ import { CLIColor } from './utils';
 // Module-level debug flag, flipped by main.ts when --debug is passed.
 let DEBUG_ENABLED = false;
 
+const NO_COLOR = process.env['NO_COLOR'] !== undefined;
+
 export function set_debug_enabled(v: boolean): void {
     DEBUG_ENABLED = v;
 }
@@ -61,12 +63,14 @@ export function log_debug(msg: string, link?: string): void {
 
 // Main subject highlight - PR ids, run ids, artifact names. Blue background.
 export function tag_primary(s: string | number): string {
-    return `${CLIColor.BgBlue0}${CLIColor.FgWhite1}${CLIColor.Bright} ${s} ${CLIColor.Reset}`;
+    if (NO_COLOR) return `${CLIColor.FgBlue9}${CLIColor.Bright}[${s}]${CLIColor.Reset}`;
+    return `${CLIColor.BgBlue9}${CLIColor.FgBlack} ${s} ${CLIColor.Reset}`;
 }
 
 // Secondary subject - filters, branch names, build job names. Teal background.
 export function tag_neutral(s: string | number): string {
-    return `${CLIColor.BgTeal3}${CLIColor.FgWhite1}${CLIColor.Bright} ${s} ${CLIColor.Reset}`;
+    if (NO_COLOR) return `${CLIColor.FgTeal6}${CLIColor.Bright}[${s}]${CLIColor.Reset}`;
+    return `${CLIColor.BgTeal6}${CLIColor.FgBlack} ${s} ${CLIColor.Reset}`;
 }
 
 // Parenthetical detail - hashes, sizes, paths inside (...). Gray foreground only.

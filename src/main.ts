@@ -1,13 +1,6 @@
 //@ts-check
 import { binary_search_disable } from './subcommands/binary';
-import {
-    enable_all_mods,
-    disable_all_mods,
-    type update_frequency,
-    isUpdateFrequency,
-    are_all_mods_unlocked,
-    parse_mod_details,
-} from './utils/mods';
+import { enable_all_mods, disable_all_mods, type update_frequency, isUpdateFrequency, are_all_mods_unlocked, parse_mod_details } from './utils/mods';
 import { annotate } from './subcommands/annotate';
 import { disable_atomic_deep, enable_atomic_deep, list_mods, list_mods_folder, list_mods_wide, toggle_mod } from './subcommands/simple';
 import { visualize_graph } from './subcommands/graph';
@@ -659,7 +652,7 @@ const commands: Record<string, CommandDefinition> = {
     debug: {
         description: 'Run debug operations',
         handler: async (args) => {
-            console.log(await parse_mod_details(MOD_BASE_DIR + "/" + "gregtech-5.09.52.526-git.1+dcb1a7eb3c-dirty.jar"))
+            console.log(await parse_mod_details(MOD_BASE_DIR + '/' + 'gregtech-5.09.52.526-git.1+dcb1a7eb3c-dirty.jar'));
         },
     },
 };
@@ -712,7 +705,13 @@ async function main() {
 
 // Forward to main function with arguments
 if (import.meta.url === import.meta.resolve('file://' + process.argv[1])) {
-    main().catch(console.error);
+    main().catch((e) => {
+        console.error(e);
+        process.exitCode = 1;
+    });
 } else {
-    main().catch(console.error);
+    main().catch((e) => {
+        console.error(e);
+        process.exitCode = 1;
+    });
 }
