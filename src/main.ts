@@ -294,14 +294,20 @@ const commands: Record<string, CommandDefinition> = {
     },
     version_verify_links: {
         description: 'Verify all mods source links against their version and update it if the local version is newer.',
-        usage: 'version verify_links [--dry]',
+        usage: 'version verify_links [--dry] [--org <github_org>]...',
         is_subcommand: true,
         handler: async (args) => {
             if (args.includes('--help')) {
                 console.log(commands['version_verify_links']?.usage);
                 return;
             }
-            await verify_and_refresh_source_links({ dry: args.includes('--dry') });
+            const orgs: string[] = [];
+            for (let i = 0; i < args.length; i++) {
+                if (args[i] === '--org' && args[i + 1] != undefined) {
+                    orgs.push(args[++i] as string);
+                }
+            }
+            await verify_and_refresh_source_links({ dry: args.includes('--dry'), orgs: orgs.length > 0 ? orgs : undefined });
             return;
         },
     },

@@ -1,5 +1,5 @@
 import { ANNOTATED_FILE, DOWNLOAD_TEMP_DIR, DOWNLOAD_UNDO_DIR, GITHUB_API_KEY, MOD_BASE_DIR } from '../utils/config';
-import { assert_gh_key, download_file, filter_assets, print_gh_ratelimits, query_gh_project_by_url, SOURCE_API_KEYS } from '../utils/fetch';
+import { assert_gh_key, download_file, filter_assets, gh_request, print_gh_ratelimits, query_gh_project_by_url, SOURCE_API_KEYS } from '../utils/fetch';
 import {
     collect_files_from_zip,
     extract_file_from_zip,
@@ -568,15 +568,66 @@ export async function restore_to_asset_versions(
     await print_gh_ratelimits(GITHUB_API_KEY);
 }
 
+async function search_gh_org_repos(
+    org: string,
+    query: string,
+): Promise<{ name: string; html_url: string; full_name: string }[]> {
+    const gh_api_key = SOURCE_API_KEYS.get('GITHUB');
+    if (gh_api_key == undefined) throw Error('Missing github API key.');
+    const res = await gh_request(`/search/repositories?q=${encodeURIComponent(`${query} org:${org}`)}&per_page=10`, gh_api_key);
+    if (!res.ok) return [];
+    const body = (await res.json()) as { items?: { name: string; html_url: string; full_name: string }[] };
+    return body.items ?? [];
+}
+
 //#region refresh links
 export async function verify_and_refresh_source_links(
     options: {
         dry: boolean;
+        orgs?: string[];
     },
     mod_map?: Map<string, mod_object>,
 ) {
     assert_gh_key();
     mod_map = mod_map == undefined ? await read_saved_mods(ANNOTATED_FILE) : mod_map;
+
+    // Try to find github repos for mods that dont have any source yet in the github orgs provided in --org
+    if (options.orgs && options.orgs.length > 0) {
+        log_step(`Searching GitHub orgs ${options.orgs.map(tag_primary).join(', ')} for unlinked mods...`);
+
+        for (const [mod_name, mod] of mod_map) {
+            if (mod.update_state.source_type === 'OTHER' || !mod.source) continue;
+
+            for (const org of options.orgs) {
+                const results = await search_gh_org_repos(org, mod_name);
+                if (results.length === 0) continue;
+
+                const scored = results
+                    .map((repo) => {
+                        const r = repo.name.toLowerCase().replace(/[-_]/g, '');
+                        const m = mod_name.toLowerCase().replace(/[-_]/g, '');
+                        const score = r === m ? 3 : r.includes(m) || m.includes(r) ? 1 : 0;
+                        return { repo, score };
+                    })
+                    .filter((x) => x.score > 0)
+                    .sort((a, b) => b.score - a.score);
+
+                if (scored.length === 0) continue;
+                if (scored.length > 1 && scored[0]!.score === scored[1]!.score) {
+                    log_warn(`Ambiguous results for ${tag_primary(mod_name)} in org ${tag_primary(org)}: ${scored.map((s) => s.repo.full_name).join(', ')}`);
+                    continue;
+                }
+
+                const best = scored[0]!.repo;
+                log_ok(`Found repo for ${tag_primary(mod_name)}: ${tag_bracket(best.html_url)}`);
+                if (!options.dry) {
+                    mod.source = best.html_url;
+                    mod.update_state.source_type = 'GITHUB';
+                }
+                break;
+            }
+        }
+    }
 
     for (const [mod_name, mod] of mod_map) {
         if (!mod.update_state || !mod.source) continue;
@@ -617,7 +668,7 @@ export async function verify_and_refresh_source_links(
                                         );
                                         page++;
                                     } else {
-                                        console.warn('W: Failed to fetch further releases for page ', page, '.');
+                                        log_warn('W: Failed to fetch further releases for page ' + page);
                                         break;
                                     }
                                 }
@@ -636,7 +687,7 @@ export async function verify_and_refresh_source_links(
                         }
                     }
                 } else {
-                    console.warn('W: Encountered malformed source URL for mod ', mod_name, ', skipping.', mod.source);
+                    log_warn('W: Encountered malformed source URL for mod ' + mod_name + ', skipping.', mod.source);
                     continue;
                 }
 
