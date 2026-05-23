@@ -712,9 +712,9 @@ export async function apply_github_artifact(artifact: Artifact, options: { dry: 
 
     // Actually download the artifact, should always be a zip or a jar (also a zip :KEKW:)
     log_step('Downloading artifact...');
-    await download_file(artifact.archive_download_url, 'GITHUB', temp_dir, artifact.name + '.zip', SOURCE_API_KEYS.get('GITHUB'));
-    const is_zip = artifact.name.endsWith('.jar');
-    const zip_file_name = temp_dir + '/' + artifact.name + is_zip ? '.zip' : '';
+    const is_zip = !artifact.name.endsWith('.jar');
+    await download_file(artifact.archive_download_url, 'GITHUB', temp_dir, artifact.name + (is_zip ? '.zip' : ''), SOURCE_API_KEYS.get('GITHUB'));
+    const zip_file_name = temp_dir + '/' + artifact.name + (is_zip ? '.zip' : '');
     const file = Bun.file(zip_file_name);
 
     // Check integrity of file
@@ -731,7 +731,7 @@ export async function apply_github_artifact(artifact: Artifact, options: { dry: 
         log_err('Downloaded file matches expected but is not a zip / jar file. We can only handle zip / jar files for now.');
         return;
     } else {
-        log_step(`Downloaded artifact ${is_zip ? 'zip' : 'jar'} ${tag_primary(artifact.name + is_zip ? 'zip' : '')}`);
+        log_step(`Downloaded artifact ${is_zip ? 'zip' : 'jar'} ${tag_primary(artifact.name + (is_zip ? 'zip' : ''))}`);
     }
 
     let jar_file = artifact.name;

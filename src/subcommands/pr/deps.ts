@@ -19,7 +19,7 @@ import { preflight_same_repo_dep } from './preflight';
 import { fetch_pr_meta, new_gh_cache, classify_pr_state, find_merged_prs_since_daily, read_mod_map, type GhCache, type PRMeta } from './graph';
 import { type mod_object } from '../../utils/mods';
 import { resolve_artifact_for_url, verify_uncertain_refs, type Artifact } from './resolve';
-import { mkdir, rm } from 'node:fs/promises';
+import { mkdir, rename, rm } from 'node:fs/promises';
 import path from 'node:path';
 
 export interface DepsOptions {
@@ -331,26 +331,33 @@ async function download_and_emit_manifest(resolved_deps: ResolvedDep[], options:
             const dep = resolved_deps[i]!;
             const progress = `[${i + 1}/${total}]`;
 
-            log_step(`${tag_count(progress)} Downloading ZIP ${tag_primary(dep.artifact.name)} ${tag_dim(`(${dep.pr_id})`)}...`);
-            const zip_path = await download_and_verify_zip(dep, temp_zips_dir);
+            log_step(`${tag_count(progress)} Downloading artifact ${tag_primary(dep.artifact.name)} ${tag_dim(`(${dep.pr_id})`)}...`);
+            const { file_path, is_zip  } = await download_and_verify_zip(dep, temp_zips_dir);
 
-            const jar_files = (await collect_files_from_zip(zip_path, jar_pattern)) ?? [];
-            if (jar_files.length < 1) {
-                log_err(`Artifact zip ${dep.artifact.name} contains no files ending with '${options.jar_suffix}'.`);
-                throw Error();
-            } else if (jar_files.length > 1) {
-                log_err(`Artifact zip ${dep.artifact.name} contains more than one file ending with '${options.jar_suffix}': [${jar_files.join(', ')}].`);
-                throw Error();
+            let target_jar_path = undefined;
+            if (is_zip) {
+                const jar_files = (await collect_files_from_zip(file_path, jar_pattern)) ?? [];
+                if (jar_files.length < 1) {
+                    log_err(`Artifact zip ${dep.artifact.name} contains no files ending with '${options.jar_suffix}'.`);
+                    throw Error();
+                } else if (jar_files.length > 1) {
+                    log_err(`Artifact zip ${dep.artifact.name} contains more than one file ending with '${options.jar_suffix}': [${jar_files.join(', ')}].`);
+                    throw Error();
+                }
+                
+                const matched_file_in_zip = jar_files[0]!;
+                const jar_filename = matched_file_in_zip.replace(/(?:.*?)([^\/]+?$)/, '$1');
+                target_jar_path = path.join(dest_dir, jar_filename);
+                
+                log_step(`${tag_count(progress)} Extracting ${tag_primary(jar_filename)}...`);
+                const extracted_buffer = await extract_file_from_zip(file_path, matched_file_in_zip);
+                await Bun.write(target_jar_path, extracted_buffer);
+                await rm(file_path);
+            } else {
+                const jar_filename = file_path.replace(/(?:.*?)([^\/]+?$)/, '$1');
+                target_jar_path = path.join(dest_dir, jar_filename);
+                await rename(file_path, target_jar_path)
             }
-
-            const matched_file_in_zip = jar_files[0]!;
-            const jar_filename = matched_file_in_zip.replace(/(?:.*?)([^\/]+?$)/, '$1');
-            const target_jar_path = path.join(dest_dir, jar_filename);
-
-            log_step(`${tag_count(progress)} Extracting ${tag_primary(jar_filename)}...`);
-            const extracted_buffer = await extract_file_from_zip(zip_path, matched_file_in_zip);
-            await Bun.write(target_jar_path, extracted_buffer);
-            await rm(zip_path);
 
             manifest.dependencies.push({
                 jar_path: target_jar_path,
@@ -371,20 +378,24 @@ async function download_and_emit_manifest(resolved_deps: ResolvedDep[], options:
 }
 
 // Download the dep's artifact zip into temp_zips_dir and verify size/checksum/zip-magic before returning its path.
-async function download_and_verify_zip(dep: ResolvedDep, temp_zips_dir: string): Promise<string> {
-    const zip_name = dep.artifact.name + '.zip';
-    const zip_path = path.join(temp_zips_dir, zip_name);
+async function download_and_verify_zip(dep: ResolvedDep, temp_zips_dir: string): Promise<{
+    file_path: string,
+    is_zip: boolean
+}> {
+    const is_zip = !dep.artifact.name.endsWith('.jar');
+    const file_name = dep.artifact.name + (is_zip ? '.zip' : '');
+    const file_path = path.join(temp_zips_dir, file_name);
     await download_file(
         dep.artifact.archive_download_url,
         'GITHUB',
         temp_zips_dir,
-        zip_name,
+        file_name, 
         SOURCE_API_KEYS.get('GITHUB'),
     );
 
-    const file = Bun.file(zip_path);
+    const file = Bun.file(file_path);
     if (!(await file.exists())) {
-        log_err(`Failed to download file, is on disk missing.`, zip_path);
+        log_err(`Failed to download file, is on disk missing.`, file_path);
         throw Error();
     } else if (file.size !== dep.artifact.size_in_bytes) {
         log_err(`Size of downloaded file differs, got ${file.size} against expected ${dep.artifact.size_in_bytes}.`);
@@ -393,8 +404,12 @@ async function download_and_verify_zip(dep: ResolvedDep, temp_zips_dir: string):
         log_err(`Checksum of file differs.`);
         throw Error();
     } else if (!(await is_zip_file(file))) {
-        log_err(`Downloaded file matches expected but is not a zip file.`);
+        log_err(`Downloaded file matches expected but is not a zip / jar file.`);
         throw Error();
     }
-    return zip_path;
+
+    return {
+        file_path: file_path,
+        is_zip
+    }
 }

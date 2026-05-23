@@ -323,16 +323,19 @@ async function select_artifact_from_workflow(
     if (collected.length === 0) {
         return { ok: false, reason: 'no_artifact', detail: `No usable (non-expired) artifacts across ${workflows.length} workflow run(s).`, link: run.html_url };
     }
+    log_debug(`Found ${collected.length} artifacts: ` + collected.map((arti) => arti.artifact.name))
 
-    // Filter by name if requested - try each filter in order, take first match.
+    // Use filters in the order they were provided via arguments
     if (opts.artifact_name != undefined && opts.artifact_name.length > 0) {
         let matched: typeof collected[number] | undefined;
         let matched_filter: string | undefined;
-        for (const filter of opts.artifact_name) {
-            matched = collected.find((item) => item.artifact.name.toLowerCase().includes(filter.toLowerCase()));
-            if (matched != undefined) {
-                matched_filter = filter;
-                break;
+        outer: for (const filter of opts.artifact_name) {
+            for (const item of collected) {
+                if (item.artifact.name.toLowerCase().includes(filter.toLowerCase())) {
+                    matched = item;
+                    matched_filter = filter;
+                    break outer;
+                }
             }
         }
         if (matched == undefined) {
