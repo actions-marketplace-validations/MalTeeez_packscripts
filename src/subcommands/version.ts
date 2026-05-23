@@ -568,9 +568,7 @@ export async function restore_to_asset_versions(
     await print_gh_ratelimits(GITHUB_API_KEY);
 }
 
-async function fetch_gh_org_repos(
-    org: string,
-): Promise<{ name: string; html_url: string; full_name: string }[]> {
+async function fetch_gh_org_repos(org: string): Promise<{ name: string; html_url: string; full_name: string }[]> {
     const gh_api_key = SOURCE_API_KEYS.get('GITHUB');
     if (gh_api_key == undefined) throw Error('Missing github API key.');
     const repos: { name: string; html_url: string; full_name: string }[] = [];
@@ -597,6 +595,7 @@ export async function verify_and_refresh_source_links(
 ) {
     assert_gh_key();
     mod_map = mod_map == undefined ? await read_saved_mods(ANNOTATED_FILE) : mod_map;
+    const available_repo_map: Map<string, string> = new Map();
 
     // Try to find github repos for mods that dont have any source yet in the github orgs provided in --org
     if (options.orgs && options.orgs.length > 0) {
@@ -609,7 +608,7 @@ export async function verify_and_refresh_source_links(
 
         for (const [mod_name, mod] of mod_map) {
             // Run only for mods that have an empty source & are on github or unknown
-            if ((mod.update_state.source_type === 'OTHER' || mod.update_state.source_type === "GITHUB") && !mod.source) continue;
+            if (!(mod.update_state.source_type === 'OTHER' || mod.update_state.source_type === 'GITHUB') || mod.source) continue;
 
             for (const org of options.orgs) {
                 const repos = org_repo_lists.get(org) ?? [];
@@ -631,56 +630,61 @@ export async function verify_and_refresh_source_links(
                 }
 
                 const best = scored[0]!.repo;
-                log_ok(`Found repo for ${tag_primary(mod_name)}: ${tag_bracket(best.html_url)}`);
-                if (!options.dry) {
-                    mod.source = best.html_url;
-                    mod.update_state.source_type = 'GITHUB';
-                }
+
+                log_info(`Tentatively found a repo for mod without source ${tag_primary(mod_name)} to ${tag_bracket(best.html_url)}, verifying release...`);
+                available_repo_map.set(mod_name, best.html_url + '/releases/tag');
                 break;
             }
         }
     }
 
     for (const [mod_name, mod] of mod_map) {
-        if (!mod.update_state || !mod.source) continue;
+        if (!mod.update_state) continue;
 
         const source_api_key = SOURCE_API_KEYS.get(mod.update_state.source_type);
-        if (!source_api_key) {
+        if (!source_api_key && mod.update_state.source_type !== 'OTHER') {
             //console.warn('W: Missing API key for mods source ', mod.update_state.source_type, ', ignoring.');
             continue;
         }
 
-        switch (mod.update_state.source_type) {
+        const available_repo = available_repo_map.get(mod_name);
+        const mod_source = available_repo ?? mod.source;
+        const mod_version = mod.update_state.version;
+        const mod_source_type = available_repo != undefined ? 'GITHUB' : mod.update_state.source_type;
+
+        if (!mod_source) continue;
+
+        switch (mod_source_type) {
             case 'GITHUB': {
-                const url_match = parse_gh_url(mod.source);
+                const url_match = parse_gh_url(mod_source);
                 if (url_match != undefined) {
                     const { owner, project, primary, secondary, key } = url_match;
                     // Does the version on the file match the version in the url
-                    if (primary === 'releases' && secondary === 'tag' && key != undefined && mod.update_state.version !== key) {
+                    if (primary === 'releases' && secondary === 'tag' && key != undefined && mod_version !== key) {
                         // Has to be updated, fetch releases from github
                         let release: Release | undefined = undefined;
-                        let { headers, status, body } = await query_gh_project_by_url(mod.source, '/releases?per_page=100');
+                        let { headers, status, body } = await query_gh_project_by_url(mod_source, '/releases?per_page=100');
                         if (status == '200' && body != undefined && Array.isArray(body)) {
                             const releases = Array.from(body);
                             // Try to find in releases by matching mod version against release tag
-                            release = releases.find((entry: Release) => entry.tag_name === mod.update_state.version);
+                            release = releases.find((entry: Release) => entry.tag_name === mod_version);
 
                             if (release == undefined && headers?.get('link')?.includes('rel="last"')) {
                                 let page = 2;
                                 while (release == undefined && page < 10 && headers?.get('link')?.includes('rel="last"')) {
-                                    ({ headers, status, body } = await query_gh_project_by_url(mod.source, '/releases?per_page=100&page=' + page));
+                                    ({ headers, status, body } = await query_gh_project_by_url(mod_source, '/releases?per_page=100&page=' + page));
                                     if (status == '200' && body != undefined && Array.isArray(body)) {
                                         // Find release from matched tag or matched asset digest
                                         release = body.find(
                                             (entry: Release) =>
-                                                entry.tag_name === mod.update_state.version ||
+                                                entry.tag_name === mod_version ||
                                                 entry.assets.find(
                                                     (asset_entry) => asset_entry.digest != null && asset_entry.digest.slice(7) === mod.update_state.sha256_sum,
                                                 ) != undefined,
                                         );
                                         page++;
                                     } else {
-                                        log_warn('W: Failed to fetch further releases for page ' + page);
+                                        log_warn('Failed to fetch further releases for page ' + page);
                                         break;
                                     }
                                 }
@@ -691,6 +695,11 @@ export async function verify_and_refresh_source_links(
                             const asset = release.assets.find((entry) => entry.digest != null && entry.digest.slice(7) === mod.update_state.sha256_sum);
                             if (asset != undefined) {
                                 mod.source = asset.browser_download_url;
+                                mod.update_state.version = release.tag_name;
+                                if (available_repo != undefined) {
+                                    log_info(`Found mod ${mod_name} at github repo ${owner}/${project}, using as future source.`);
+                                    mod.update_state.source_type = 'GITHUB';
+                                }
                             } else {
                                 console.log(`Found matching release for mod ${mod_name}, but failed to find matching asset.`);
                             }
@@ -699,7 +708,7 @@ export async function verify_and_refresh_source_links(
                         }
                     }
                 } else {
-                    log_warn('W: Encountered malformed source URL for mod ' + mod_name + ', skipping.', mod.source);
+                    log_warn('Encountered malformed source URL for mod ' + mod_name + ', skipping.', mod.source);
                     continue;
                 }
 
