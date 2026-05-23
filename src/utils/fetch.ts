@@ -3,7 +3,7 @@ import { parse_gh_url } from './sources';
 import type { JsonObject } from './utils';
 import { is_mod_ignored_by_name, type SourceType } from './mods';
 import { GITHUB_API_KEY } from './config';
-import { log_debug, tag_count, tag_ok } from './log';
+import { log_debug, log_err, tag_count, tag_ok } from './log';
 
 export const SOURCE_API_KEYS: Map<SourceType, string> = new Map();
 
@@ -123,7 +123,8 @@ export async function gh_request(path: string, api_key: string, method: string =
     if (res.status === 403 && res.headers.get('x-ratelimit-remaining') === '0') {
         const reset = res.headers.get('x-ratelimit-reset');
         const secs = reset ? Math.max(0, parseInt(reset) * 1000 - Date.now()) / 1000 : undefined;
-        console.warn(`W: GitHub rate limit exceeded. Resets in ~${secs?.toFixed(0)}s`);
+        log_err(`GitHub rate limit exceeded. Resets in ~${secs?.toFixed(0)}s`);
+        throw Error()
     }
 
     if (!res.ok) {

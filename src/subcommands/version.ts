@@ -568,16 +568,23 @@ export async function restore_to_asset_versions(
     await print_gh_ratelimits(GITHUB_API_KEY);
 }
 
-async function search_gh_org_repos(
+async function fetch_gh_org_repos(
     org: string,
-    query: string,
 ): Promise<{ name: string; html_url: string; full_name: string }[]> {
     const gh_api_key = SOURCE_API_KEYS.get('GITHUB');
     if (gh_api_key == undefined) throw Error('Missing github API key.');
-    const res = await gh_request(`/search/repositories?q=${encodeURIComponent(`${query} org:${org}`)}&per_page=10`, gh_api_key);
-    if (!res.ok) return [];
-    const body = (await res.json()) as { items?: { name: string; html_url: string; full_name: string }[] };
-    return body.items ?? [];
+    const repos: { name: string; html_url: string; full_name: string }[] = [];
+    let page = 1;
+    while (true) {
+        const res = await gh_request(`/orgs/${org}/repos?per_page=100&page=${page}`, gh_api_key);
+        if (!res.ok) break;
+        const body = (await res.json()) as { name: string; html_url: string; full_name: string }[];
+        if (!Array.isArray(body) || body.length === 0) break;
+        repos.push(...body);
+        if (body.length < 100) break;
+        page++;
+    }
+    return repos;
 }
 
 //#region refresh links
@@ -593,16 +600,21 @@ export async function verify_and_refresh_source_links(
 
     // Try to find github repos for mods that dont have any source yet in the github orgs provided in --org
     if (options.orgs && options.orgs.length > 0) {
-        log_step(`Searching GitHub orgs ${options.orgs.map(tag_primary).join(', ')} for unlinked mods...`);
+        // Fetch each org's full repo list once, then match against it as cache
+        const org_repo_lists = new Map<string, { name: string; html_url: string; full_name: string }[]>();
+        for (const org of options.orgs) {
+            log_step(`Fetching repo list for org ${tag_primary(org)}...`);
+            org_repo_lists.set(org, await fetch_gh_org_repos(org));
+        }
 
         for (const [mod_name, mod] of mod_map) {
-            if (mod.update_state.source_type === 'OTHER' || !mod.source) continue;
+            // Run only for mods that have an empty source & are on github or unknown
+            if ((mod.update_state.source_type === 'OTHER' || mod.update_state.source_type === "GITHUB") && !mod.source) continue;
 
             for (const org of options.orgs) {
-                const results = await search_gh_org_repos(org, mod_name);
-                if (results.length === 0) continue;
+                const repos = org_repo_lists.get(org) ?? [];
 
-                const scored = results
+                const scored = repos
                     .map((repo) => {
                         const r = repo.name.toLowerCase().replace(/[-_]/g, '');
                         const m = mod_name.toLowerCase().replace(/[-_]/g, '');
