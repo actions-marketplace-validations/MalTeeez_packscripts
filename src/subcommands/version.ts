@@ -680,7 +680,7 @@ export async function switch_to_indev_version(
     }
     assert_gh_key();
     mod_map = mod_map ?? (await read_saved_mods(ANNOTATED_FILE));
-    
+
     const url_match = parse_gh_url(source_url);
     const artifact = await get_dl_url_from_github_url(source_url, options.build_job, options.artifact_name, 10, options.allow_failed_workflows ?? false);
     if (artifact == undefined || url_match == undefined || url_match.primary == undefined) {
@@ -699,11 +699,7 @@ export async function switch_to_indev_version(
     await apply_github_artifact(artifact, options, mod_map);
 }
 
-export async function apply_github_artifact(
-    artifact: Artifact,
-    options: { dry: boolean; },
-    mod_map: Map<string, mod_object>,
-) {
+export async function apply_github_artifact(artifact: Artifact, options: { dry: boolean }, mod_map: Map<string, mod_object>) {
     if (options.dry) return;
 
     const temp_dir = DOWNLOAD_TEMP_DIR.replace(/\/$/m, '') + '/indev';
@@ -714,10 +710,11 @@ export async function apply_github_artifact(
 
     await mkdir(temp_dir, { recursive: true });
 
-    // Actually download the artifact, should always be a zip
+    // Actually download the artifact, should always be a zip or a jar (also a zip :KEKW:)
     log_step('Downloading artifact...');
     await download_file(artifact.archive_download_url, 'GITHUB', temp_dir, artifact.name + '.zip', SOURCE_API_KEYS.get('GITHUB'));
-    const zip_file_name = temp_dir + '/' + artifact.name + '.zip';
+    const is_zip = artifact.name.endsWith('.jar');
+    const zip_file_name = temp_dir + '/' + artifact.name + is_zip ? '.zip' : '';
     const file = Bun.file(zip_file_name);
 
     // Check integrity of file
@@ -731,28 +728,32 @@ export async function apply_github_artifact(
         log_err(`Checksum of file differs, got ${tag_dim(await hash_buffer(await file.bytes(), 'sha256'))} against expected ${tag_dim(artifact.digest)}.`);
         return;
     } else if (!(await is_zip_file(file))) {
-        log_err('Downloaded file matches expected but is not a zip file. We can only handle zip files for now.');
+        log_err('Downloaded file matches expected but is not a zip / jar file. We can only handle zip / jar files for now.');
         return;
     } else {
-        log_step(`Downloaded artifact zip ${tag_primary(artifact.name + ".zip")}`)
+        log_step(`Downloaded artifact ${is_zip ? 'zip' : 'jar'} ${tag_primary(artifact.name + is_zip ? 'zip' : '')}`);
     }
 
-    // Find .jar file in zip we want and extract it
-    const jar_files = (await collect_files_from_zip(zip_file_name, /\.jar$/m)) ?? [];
-    const filtered_jar_files = jar_files.filter((file_in_zip) => !is_mod_ignored_by_name(file_in_zip.replace(/(?:.*?)([^\/]+?$)/, '$1')));
+    let jar_file = artifact.name;
+    let jar_file_path = zip_file_name;
+    if (is_zip) {
+        // Find .jar file in zip we want and extract it
+        const jar_files = (await collect_files_from_zip(zip_file_name, /\.jar$/m)) ?? [];
+        const filtered_jar_files = jar_files.filter((file_in_zip) => !is_mod_ignored_by_name(file_in_zip.replace(/(?:.*?)([^\/]+?$)/, '$1')));
 
-    if (filtered_jar_files.length > 1) {
-        log_err(`Zip contains more than one file after filtering. Remaining: ${filtered_jar_files.join(', ')}`);
-        return;
-    } else if (filtered_jar_files.length < 1) {
-        log_err('Zip contains no .jar files that we want / expected.');
-        return;
+        if (filtered_jar_files.length > 1) {
+            log_err(`Zip contains more than one file after filtering. Remaining: ${filtered_jar_files.join(', ')}`);
+            return;
+        } else if (filtered_jar_files.length < 1) {
+            log_err('Zip contains no .jar files that we want / expected.');
+            return;
+        }
+
+        jar_file = (filtered_jar_files[0] as string).replace(/(?:.*?)([^\/]+?$)/, '$1');
+        jar_file_path = temp_dir + '/' + jar_file;
+        await Bun.write(jar_file_path, await extract_file_from_zip(zip_file_name, filtered_jar_files[0] as string));
+        log_step(`Extracted mod jar from zip to ${tag_bracket(jar_file_path)}`);
     }
-
-    const jar_file = (filtered_jar_files[0] as string).replace(/(?:.*?)([^\/]+?$)/, '$1');
-    const jar_file_path = temp_dir + '/' + jar_file;
-    await Bun.write(jar_file_path, await extract_file_from_zip(zip_file_name, filtered_jar_files[0] as string));
-    log_step(`Extracted mod jar from zip to ${tag_bracket(jar_file_path)}`);
 
     // Check modid of jar for switching out with existing version
     const { id: mod_id, version: mod_version, wants: mod_wants, hash: mod_hash, other_mod_ids: mod_other_ids } = await parse_mod_details(jar_file_path);
@@ -769,10 +770,10 @@ export async function apply_github_artifact(
 
     // Jar was recognized as a mod, update / add it via our tracked mods
     if (mod_obj != undefined) {
-        log_debug   (
+        log_debug(
             `Mod ${tag_primary(mod_id)} is a tracked mod, currently under ` +
                 `${tag_bracket(mod_obj.file_path)} ` +
-                `with version ${tag_neutral(mod_obj.update_state.version ?? "UNKNOWN")}.`,
+                `with version ${tag_neutral(mod_obj.update_state.version ?? 'UNKNOWN')}.`,
         );
         const old_jar = Bun.file(mod_obj.file_path);
         if (await old_jar.exists()) {
@@ -795,9 +796,7 @@ export async function apply_github_artifact(
         mod_obj.source = artifact.archive_download_url;
         mod_obj.update_state.last_updated_at = new Date(Date.now()).toISOString();
     } else {
-        log_info(
-            `Mod ${tag_primary(mod_id)} is not yet tracked, adding to map.`,
-        );
+        log_info(`Mod ${tag_primary(mod_id)} is not yet tracked, adding to map.`);
 
         await rename_file(jar_file_path, jar_mod_path);
         log_step('Moved indev jar to mods folder, adding track entry...');

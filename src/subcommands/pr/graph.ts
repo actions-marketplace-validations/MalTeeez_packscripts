@@ -82,7 +82,7 @@ export interface DepGraph {
 
 export interface BuildOpts {
     build_jobs?: string[];
-    artifact_name?: string;
+    artifact_name?: string[];
     allow_failed_workflows?: boolean;
     allow_external_owners?: boolean;
     other_allowed_owners?: string[];

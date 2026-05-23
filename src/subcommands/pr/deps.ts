@@ -27,7 +27,7 @@ export interface DepsOptions {
     jar_suffix: string;
     dry?: boolean;
     build_jobs?: string[];
-    artifact_name?: string;
+    artifact_name?: string[];
     allow_failed_workflows?: boolean;
     allow_external_owners?: boolean;
     other_allowed_owners?: string[];

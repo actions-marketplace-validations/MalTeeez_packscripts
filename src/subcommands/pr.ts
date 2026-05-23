@@ -19,7 +19,7 @@ export async function get_dl_url_from_github_url(
 ): Promise<Artifact | undefined> {
     const res = await resolve_artifact_for_url(source_url, {
         build_jobs: build_job != undefined ? [build_job] : undefined,
-        artifact_name,
+        artifact_name: artifact_name != undefined ? [artifact_name] : undefined,
         allow_failed_workflows,
         commit_lookback,
     });
@@ -31,7 +31,7 @@ export async function get_dl_url_from_github_url(
 export interface ApplyOptions {
     dry: boolean;
     build_jobs?: string[];
-    artifact_name?: string;
+    artifact_name?: string[];
     allow_failed_workflows?: boolean;
     allow_external_owners?: boolean;
     other_allowed_owners?: string[];

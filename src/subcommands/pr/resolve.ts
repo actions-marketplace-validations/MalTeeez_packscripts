@@ -42,7 +42,7 @@ export type ResolveResult =
 
 export interface ResolveOpts {
     build_jobs?: string[];
-    artifact_name?: string;
+    artifact_name?: string[];
     allow_failed_workflows?: boolean;
     wait_timeout_ms?: number;
     poll_interval_ms?: number;
@@ -274,7 +274,7 @@ export async function wait_for_workflow_run(
 async function resolve_from_run_id(
     source_url: string,
     run_id: string,
-    opts: { build_jobs?: string[]; artifact_name?: string; allow_failed_workflows: boolean; wait_timeout_ms: number; poll_interval_ms: number },
+    opts: { build_jobs?: string[]; artifact_name?: string[]; allow_failed_workflows: boolean; wait_timeout_ms: number; poll_interval_ms: number },
 ): Promise<ResolveResult> {
     // Fetch run metadata to know its name and current conclusion.
     const { status, body } = await query_gh_project_by_url(source_url, `/actions/runs/${run_id}`);
@@ -297,7 +297,7 @@ async function select_artifact_from_workflow(
     run: WorkflowRunSummary,
     other_runs: WorkflowRunSummary[],
     resolved_sha: string,
-    opts: { build_jobs?: string[]; artifact_name?: string; allow_failed_workflows: boolean },
+    opts: { build_jobs?: string[]; artifact_name?: string[]; allow_failed_workflows: boolean },
 ): Promise<ResolveResult> {
     // If picked run failed and we don't tolerate that, return.
     if (run.conclusion != null && FAILED_WORKFLOW_CONCLUSIONS.includes(run.conclusion) && !opts.allow_failed_workflows) {
@@ -324,14 +324,21 @@ async function select_artifact_from_workflow(
         return { ok: false, reason: 'no_artifact', detail: `No usable (non-expired) artifacts across ${workflows.length} workflow run(s).`, link: run.html_url };
     }
 
-    // Filter by name if requested.
-    if (opts.artifact_name != undefined) {
-        const filter = opts.artifact_name.toLowerCase();
-        const matched = collected.find((item) => item.artifact.name.toLowerCase().includes(filter));
-        if (matched == undefined) {
-            return { ok: false, reason: 'artifact_filter_miss', detail: `No artifact matched filter '${opts.artifact_name}' among ${collected.length} candidates.`, link: run.html_url };
+    // Filter by name if requested - try each filter in order, take first match.
+    if (opts.artifact_name != undefined && opts.artifact_name.length > 0) {
+        let matched: typeof collected[number] | undefined;
+        let matched_filter: string | undefined;
+        for (const filter of opts.artifact_name) {
+            matched = collected.find((item) => item.artifact.name.toLowerCase().includes(filter.toLowerCase()));
+            if (matched != undefined) {
+                matched_filter = filter;
+                break;
+            }
         }
-        log_debug(`Selected specific artifact (${tag_neutral(matched.artifact.name)}) from run ${tag_neutral(matched.src_run.name)} (${tag_dim(matched.src_run.id)})...`);
+        if (matched == undefined) {
+            return { ok: false, reason: 'artifact_filter_miss', detail: `No artifact matched any filter [${opts.artifact_name.join(', ')}] among ${collected.length} candidates.`, link: run.html_url };
+        }
+        log_debug(`Selected specific artifact (${tag_neutral(matched.artifact.name)}) via filter '${matched_filter}' from run ${tag_neutral(matched.src_run.name)} (${tag_dim(matched.src_run.id)})...`);
 
         return { ok: true, reason: 'workflow_artifact', artifact: matched.artifact, run_url: run.html_url, resolved_sha, other_runs };
     }
