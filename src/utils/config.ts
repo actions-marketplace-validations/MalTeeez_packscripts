@@ -77,6 +77,9 @@ export interface Config {
 let config_file_exists: boolean;
 let config: Config;
 
+const _workdir = Bun.env.PACKSCRIPTS_WORKDIR;
+if (_workdir) process.chdir(_workdir);
+
 const _config_env = Bun.env.PACKSCRIPTS_CONFIG;
 if (_config_env) {
     config_file_exists = true;
@@ -84,8 +87,6 @@ if (_config_env) {
         const _resp = await fetch(_config_env);
         if (!_resp.ok) throw new Error(`Failed to fetch packscripts config from ${_config_env}: ${_resp.status} ${_resp.statusText}`);
         config = (await _resp.json()) as Config;
-        const _workdir = Bun.env.PACKSCRIPTS_WORKDIR;
-        if (_workdir) process.chdir(_workdir);
     } else {
         const _abs = path.resolve(_config_env);
         config = await Bun.file(_abs).json();
