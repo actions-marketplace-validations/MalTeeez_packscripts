@@ -667,14 +667,15 @@ export async function verify_and_refresh_source_links(
                         // Search releases by digest to find the direct asset download URL.
                         // We don't care about the URL format — just need owner/project and the digest.
                         const digest = mod.update_state.sha256_sum;
-                        function asset_matches_digest(asset_entry: { digest: string | null }) {
-                            asset_entry.digest != null && 
-                            asset_entry.digest.slice(7) === digest;
+                        function asset_matches_digest(asset: ReleaseAsset) {
+                            return asset.digest != null && 
+                            asset.digest.slice(7) === digest;
                         } 
 
                         let release: Release | undefined = undefined;
                         let { headers, status, body } = await query_gh_project_by_owner_project(url_match, '/releases?per_page=100');
                         if (status == '200' && body != undefined && Array.isArray(body)) {
+                            log_debug(`Found ${body.length} releases for mod ${mod_name}.`)
                             release = body.find((entry: Release) => entry.assets.find(asset_matches_digest) != undefined);
 
                             if (release == undefined && headers?.get('link')?.includes('rel="last"')) {
@@ -693,6 +694,7 @@ export async function verify_and_refresh_source_links(
                         }
 
                         if (release != undefined) {
+                            log_debug(`Found matching release for ${mod_name} with version ${release.tag_name}.`)
                             const asset = release.assets.find(asset_matches_digest);
                             if (asset != undefined) {
                                 mod.source = asset.browser_download_url;
