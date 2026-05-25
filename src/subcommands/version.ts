@@ -1,5 +1,5 @@
 import { ANNOTATED_FILE, DOWNLOAD_TEMP_DIR, DOWNLOAD_UNDO_DIR, GITHUB_API_KEY, MOD_BASE_DIR } from '../utils/config';
-import { assert_gh_key, download_file, filter_assets, gh_request, print_gh_ratelimits, query_gh_project_by_url, SOURCE_API_KEYS } from '../utils/fetch';
+import { assert_gh_key, download_file, filter_assets, gh_request, print_gh_ratelimits, query_gh_project_by_owner_project, query_gh_project_by_url, SOURCE_API_KEYS } from '../utils/fetch';
 import {
     collect_files_from_zip,
     extract_file_from_zip,
@@ -658,63 +658,52 @@ export async function verify_and_refresh_source_links(
                 switch (mod_source_type) {
                     case 'GITHUB': {
                         const url_match = parse_gh_url(mod_source);
-                        if (url_match != undefined) {
-                            const { owner, project, primary, secondary, key } = url_match;
-                            // Does the version on the file match the version in the url
-                            if (primary === 'releases' && secondary === 'tag' && key != undefined && mod.update_state.version !== key) {
-                                // Has to be updated, fetch releases from github
-                                let release: Release | undefined = undefined;
-                                let { headers, status, body } = await query_gh_project_by_url(mod_source, '/releases?per_page=100');
-                                if (status == '200' && body != undefined && Array.isArray(body)) {
-                                    const releases = Array.from(body);
-                                    // Try to find in releases by matching mod version against release tag
-                                    release = releases.find(
-                                        (entry: Release) =>
-                                            entry.tag_name === mod.update_state.version ||
-                                            entry.assets.find(
-                                                (asset_entry) => asset_entry.digest != null && asset_entry.digest.slice(7) === mod.update_state.sha256_sum,
-                                            ) != undefined,
-                                    );
+                        if (url_match == undefined) {
+                            log_warn('Encountered malformed source URL for mod ' + mod_name + ', skipping.', mod_source);
+                            continue;
+                        }
 
-                                    if (release == undefined && headers?.get('link')?.includes('rel="last"')) {
-                                        let page = 2;
-                                        while (release == undefined && page < 10 && headers?.get('link')?.includes('rel="last"')) {
-                                            ({ headers, status, body } = await query_gh_project_by_url(mod_source, '/releases?per_page=100&page=' + page));
-                                            if (status == '200' && body != undefined && Array.isArray(body)) {
-                                                // Find release from matched tag or matched asset digest
-                                                release = body.find(
-                                                    (entry: Release) =>
-                                                        entry.tag_name === mod.update_state.version ||
-                                                        entry.assets.find(
-                                                            (asset_entry) => asset_entry.digest != null && asset_entry.digest.slice(7) === mod.update_state.sha256_sum,
-                                                        ) != undefined,
-                                                );
-                                                page++;
-                                            } else {
-                                                log_warn('Failed to fetch further releases for page ' + page);
-                                                break;
-                                            }
-                                        }
-                                    }
-                                }
+                        const { owner, project } = url_match;
+                        // Search releases by digest to find the direct asset download URL.
+                        // We don't care about the URL format — just need owner/project and the digest.
+                        const digest = mod.update_state.sha256_sum;
+                        function asset_matches_digest(asset_entry: { digest: string | null }) {
+                            asset_entry.digest != null && 
+                            asset_entry.digest.slice(7) === digest;
+                        } 
 
-                                if (release != undefined) {
-                                    const asset = release.assets.find((entry) => entry.digest != null && entry.digest.slice(7) === mod.update_state.sha256_sum);
-                                    if (asset != undefined) {
-                                        mod.source = asset.browser_download_url;
-                                        mod.update_state.version = release.tag_name;
-                                        if (extra_github_repos != undefined) {
-                                            mod.update_state.source_type = 'GITHUB';
-                                        }
-                                        log_info(`Found mod source ${mod_name} at github repo ${owner}/${project}, using as future source.`);
+                        let release: Release | undefined = undefined;
+                        let { headers, status, body } = await query_gh_project_by_owner_project(url_match, '/releases?per_page=100');
+                        if (status == '200' && body != undefined && Array.isArray(body)) {
+                            release = body.find((entry: Release) => entry.assets.find(asset_matches_digest) != undefined);
+
+                            if (release == undefined && headers?.get('link')?.includes('rel="last"')) {
+                                let page = 2;
+                                while (release == undefined && page < 10 && headers?.get('link')?.includes('rel="last"')) {
+                                    ({ headers, status, body } = await query_gh_project_by_url(mod_source, '/releases?per_page=100&page=' + page));
+                                    if (status == '200' && body != undefined && Array.isArray(body)) {
+                                        release = body.find((entry: Release) => entry.assets.find(asset_matches_digest) != undefined);
+                                        page++;
                                     } else {
-                                        console.log(`Found matching release for mod ${mod_name}, but failed to find matching asset.`);
+                                        log_warn('Failed to fetch further releases for page ' + page);
+                                        break;
                                     }
                                 }
                             }
-                        } else {
-                            log_warn('Encountered malformed source URL for mod ' + mod_name + ', skipping.', mod_source);
-                            continue;
+                        }
+
+                        if (release != undefined) {
+                            const asset = release.assets.find(asset_matches_digest);
+                            if (asset != undefined) {
+                                mod.source = asset.browser_download_url;
+                                mod.update_state.version = release.tag_name;
+                                if (extra_github_repos != undefined) {
+                                    mod.update_state.source_type = 'GITHUB';
+                                }
+                                log_info(`Found mod source ${mod_name} at github repo ${owner}/${project}, using as future source.`);
+                            } else {
+                                log_warn(`Found matching release for mod ${mod_name}, but failed to find matching asset.`);
+                            }
                         }
 
                         break;

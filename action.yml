@@ -26,6 +26,10 @@ inputs:
     description: Working directory for packscripts. Required when config is a URL (defaults to the workspace root).
     required: false
     default: ${{ github.workspace }}
+  musl:
+    description: Use musl-linked binary on Linux instead of the default glibc-linked one.
+    required: false
+    default: 'false'
 
 outputs:
   annotated_file_path:
@@ -58,10 +62,19 @@ runs:
       run: |
         REF="${{ github.action_ref }}"
         ARCH=$(uname -m)
+        MUSL="${{ inputs.musl }}"
         if [ "$ARCH" = "aarch64" ] || [ "$ARCH" = "arm64" ]; then
-          BINARY="packscripts-arm"
+          if [ "$MUSL" = "true" ]; then
+            BINARY="packscripts-arm-musl"
+          else
+            BINARY="packscripts-arm"
+          fi
         else
-          BINARY="packscripts-nix"
+          if [ "$MUSL" = "true" ]; then
+            BINARY="packscripts-nix-musl"
+          else
+            BINARY="packscripts-nix"
+          fi
         fi
         if [[ "$REF" == v* ]]; then
           URL="https://github.com/MalTeeez/packscripts/releases/download/${REF}/${BINARY}"

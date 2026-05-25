@@ -16,8 +16,18 @@ export function assert_gh_key() {
     }
 }
 
-export async function query_gh_project_by_url(
-    url: string,
+export async function query_gh_project_by_url(url: string, sub_repo_api_path: string, gh_api_key?: string, ignore_codes: number[] = []) {
+    const url_match = parse_gh_url(url);
+    if (url_match != undefined) {
+        return await query_gh_project_by_owner_project(url_match, sub_repo_api_path, gh_api_key, ignore_codes);
+    } else {
+        console.warn(`W: GitHub URL ${url} is faulty, can't check..`);
+    }
+    return { headers: undefined, body: undefined, status: '400' };
+}
+
+export async function query_gh_project_by_owner_project(
+    target_repo: { owner: string; project: string },
     sub_repo_api_path: string,
     gh_api_key?: string,
     ignore_codes: number[] = [],
@@ -29,26 +39,21 @@ export async function query_gh_project_by_url(
         }
     }
 
-    const url_match = parse_gh_url(url);
-    if (url_match != undefined) {
-        const { owner, project } = url_match;
-        const api_path = sub_repo_api_path.replace(/^\//m, '');
-        const url = `/repos/${owner}/${project}${api_path.length > 0 ? '/' : ''}${api_path}`;
+    const { owner, project } = target_repo;
+    const api_path = sub_repo_api_path.replace(/^\//m, '');
+    const url = `/repos/${owner}/${project}${api_path.length > 0 ? '/' : ''}${api_path}`;
 
-        const res: Response | undefined = await gh_request(url, gh_api_key, 'GET');
-        if (res == undefined || !res.ok) {
-            if (res && !ignore_codes.includes(res.status)) {
-                console.warn(`W: Failed to get releases with ${res.status} | ${res.statusText} for ${project} (${url})`);
-            }
-            return { headers: res.headers, body: undefined, status: String(res.status) };
-        } else {
-            if (res.headers.get('content-type')?.includes('application/json')) {
-                const body = (await res.json()) as JsonObject;
-                return { headers: res.headers, body, status: String(res.status) };
-            }
+    const res: Response | undefined = await gh_request(url, gh_api_key, 'GET');
+    if (res == undefined || !res.ok) {
+        if (res && !ignore_codes.includes(res.status)) {
+            console.warn(`W: Failed to get releases with ${res.status} | ${res.statusText} for ${project} (${url})`);
         }
+        return { headers: res.headers, body: undefined, status: String(res.status) };
     } else {
-        console.warn(`W: GitHub URL ${url} is faulty, can't check..`);
+        if (res.headers.get('content-type')?.includes('application/json')) {
+            const body = (await res.json()) as JsonObject;
+            return { headers: res.headers, body, status: String(res.status) };
+        }
     }
     return { headers: undefined, body: undefined, status: '400' };
 }
@@ -124,7 +129,7 @@ export async function gh_request(path: string, api_key: string, method: string =
         const reset = res.headers.get('x-ratelimit-reset');
         const secs = reset ? Math.max(0, parseInt(reset) * 1000 - Date.now()) / 1000 : undefined;
         log_err(`GitHub rate limit exceeded. Resets in ~${secs?.toFixed(0)}s`);
-        throw Error()
+        throw Error();
     }
 
     if (!res.ok) {

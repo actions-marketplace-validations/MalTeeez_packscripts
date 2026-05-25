@@ -7,8 +7,10 @@
     "main": "bun run src/main.ts",
     "build_win": "bun build --target=bun-windows-x64 --compile --minify --sourcemap --windows-icon=./icon2.ico ./src/main.ts --outfile packscripts-win",
     "build_nix": "bun build --target=bun-linux-x64 --compile --minify --sourcemap ./src/main.ts --outfile packscripts-nix",
+    "build_nix_musl": "bun build --target=bun-linux-x64-musl --compile --minify --sourcemap ./src/main.ts --outfile packscripts-nix-musl",
     "build_osx": "bun build --target=bun-darwin-x64 --compile --minify --sourcemap ./src/main.ts --outfile packscripts-osx",
-    "build_arm": "bun build --target=bun-linux-arm64 --compile --minify --sourcemap ./src/main.ts --outfile packscripts-arm"
+    "build_arm": "bun build --target=bun-linux-arm64 --compile --minify --sourcemap ./src/main.ts --outfile packscripts-arm",
+    "build_arm_musl": "bun build --target=bun-linux-arm64-musl --compile --minify --sourcemap ./src/main.ts --outfile packscripts-arm-musl"
   },
   "keywords": [],
   "author": "",
