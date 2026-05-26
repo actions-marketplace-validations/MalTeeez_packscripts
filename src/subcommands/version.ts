@@ -46,6 +46,7 @@ import {
     live_log,
     render_md,
     rev_replace_all,
+    run_pool,
     update_live_zone,
 } from '../utils/utils';
 import { mkdir, rename, rm } from 'node:fs/promises';
@@ -698,6 +699,18 @@ export async function verify_and_refresh_source_links(
         }
     }
 
+    const tasks: (() => Promise<void>)[] = [];
+    let completed = 0;
+    let total = 0;
+
+    function render_progress() {
+        const progress = total > 0 ? Math.ceil(((completed / total) * 100) / 2) : 0;
+        update_live_zone([
+            `|${CLIColor.FgWhite}${'='.repeat(progress)}${CLIColor.FgGray}${'-'.repeat(50 - progress)}${CLIColor.Reset}|`,
+            `Verifying source links - ${CLIColor.FgWhite}${completed}${CLIColor.FgGray} of ${CLIColor.FgWhite}${total}${CLIColor.Reset}`,
+        ]);
+    }
+
     for (const [mod_name, mod] of mod_map) {
         if (!mod.update_state || !mod.update_state.sha256_sum) continue;
 
@@ -709,90 +722,151 @@ export async function verify_and_refresh_source_links(
 
         const extra_github_repos = available_repo_map.get(mod_name);
         const available_repos = extra_github_repos ?? [mod.source];
-        let mod_source: string | undefined;
-        let mod_source_type: SourceType;
-        if (available_repos != undefined && available_repos.length > 0) {
-            for (const available_repo of available_repos) {
-                mod_source = extra_github_repos != undefined ? available_repo : mod.source;
-                mod_source_type = extra_github_repos != undefined ? 'GITHUB' : mod.update_state.source_type;
+        if (available_repos == undefined || available_repos.length === 0) continue;
 
-                if (!mod_source) continue;
+        tasks.push(async () => {
+            try {
+                const digest = mod.update_state.sha256_sum;
+                const asset_matches_digest = (asset: ReleaseAsset) => asset.digest != null && asset.digest.slice(7) === digest;
 
-                switch (mod_source_type) {
-                    case 'GITHUB': {
-                        const url_match = parse_gh_url(mod_source);
-                        if (url_match == undefined) {
-                            log_warn('Encountered malformed source URL for mod ' + mod_name + ', skipping.', mod_source);
-                            continue;
-                        }
+                // Try a single tag fetch against owner/project. Returns true if a matching asset was found.
+                async function try_tag(url_match: { owner: string; project: string }, tag: string): Promise<boolean> {
+                    const { status, body } = await query_gh_project_by_owner_project(
+                        url_match,
+                        '/releases/tags/' + tag,
+                        undefined,
+                        [404],
+                    );
+                    if (status !== '200' || body == undefined || !Array.isArray(body.assets)) return false;
+                    const release = body as unknown as Release;
+                    const asset = release.assets.find(asset_matches_digest);
+                    if (asset == undefined) return false;
+                    mod.source = asset.browser_download_url;
+                    mod.update_state.version = release.tag_name;
+                    return true;
+                }
 
-                        const { owner, project } = url_match;
-                        // Search releases by digest to find the direct asset download URL.
-                        // We don't care about the URL format — just need owner/project and the digest.
-                        const digest = mod.update_state.sha256_sum;
-                        function asset_matches_digest(asset: ReleaseAsset) {
-                            return asset.digest != null && asset.digest.slice(7) === digest;
-                        }
+                for (const available_repo of available_repos) {
+                    const mod_source: string | undefined = extra_github_repos != undefined ? available_repo : mod.source;
+                    const mod_source_type: SourceType = extra_github_repos != undefined ? 'GITHUB' : mod.update_state.source_type;
 
-                        let release: Release | undefined = undefined;
-                        let { headers, status, body } = await query_gh_project_by_owner_project(url_match, '/releases?per_page=100');
-                        if (status == '200' && body != undefined && Array.isArray(body)) {
-                            log_debug(`Found ${body.length} releases for mod ${mod_name}.`);
-                            release = body.find((entry: Release) => entry.assets.find(asset_matches_digest) != undefined);
+                    if (!mod_source) continue;
 
-                            if (release == undefined && headers?.get('link')?.includes('rel="last"')) {
-                                let page = 2;
-                                while (release == undefined && page < 10 && headers?.get('link')?.includes('rel="last"')) {
-                                    ({ headers, status, body } = await query_gh_project_by_url(
-                                        mod_source,
-                                        '/releases?per_page=100&page=' + page,
-                                    ));
-                                    if (status == '200' && body != undefined && Array.isArray(body)) {
-                                        release = body.find((entry: Release) => entry.assets.find(asset_matches_digest) != undefined);
-                                        page++;
-                                    } else {
-                                        log_warn('Failed to fetch further releases for page ' + page);
-                                        break;
-                                    }
-                                }
+                    switch (mod_source_type) {
+                        case 'GITHUB': {
+                            const url_match = parse_gh_url(mod_source);
+                            if (url_match == undefined) {
+                                live_log(`W: Encountered malformed source URL for mod ${mod_name}, skipping. (${mod_source})`, console.warn);
+                                continue;
                             }
-                        }
 
-                        if (release != undefined) {
-                            log_debug(`Found matching release for ${mod_name} with version ${release.tag_name}.`);
-                            const asset = release.assets.find(asset_matches_digest);
-                            if (asset != undefined) {
-                                mod.source = asset.browser_download_url;
-                                mod.update_state.version = release.tag_name;
+                            const { owner, project } = url_match;
+
+                            // Step A: if the source URL is a direct asset link, trust its tag first.
+                            // Refresh collapses URLs to owner/project so this only applies before refresh,
+                            // or when update_state.version has drifted from the URL's tag.
+                            const url_tag =
+                                url_match.primary === 'releases' && url_match.secondary === 'download' ? url_match.key : undefined;
+                            if (url_tag != undefined && (await try_tag(url_match, url_tag))) {
+                                live_log(
+                                    `Found mod source ${mod_name} at github repo ${owner}/${project} via URL tag, using as future source.`,
+                                );
+                                break;
+                            }
+
+                            // Step B: fall back to update_state.version (steady-state path after refresh).
+                            const state_version = mod.update_state.version;
+                            if (state_version && state_version !== url_tag && (await try_tag(url_match, state_version))) {
+                                live_log(
+                                    `Found mod source ${mod_name} at github repo ${owner}/${project} via tracked version, using as future source.`,
+                                );
                                 if (extra_github_repos != undefined) {
                                     mod.update_state.source_type = 'GITHUB';
                                 }
-                                log_info(`Found mod source ${mod_name} at github repo ${owner}/${project}, using as future source.`);
-                            } else {
-                                log_warn(`Found matching release for mod ${mod_name}, but failed to find matching asset.`);
+                                break;
                             }
-                        }
 
-                        break;
-                    }
-                    case 'CURSEFORGE': {
-                        // TBD
-                        break;
-                    }
-                    case 'MODRINTH': {
-                        // TBD
-                        break;
-                    }
-                    case 'OTHER': {
-                        // IDK
-                        break;
-                    }
-                    default: {
-                        console.warn(`W: Encountered unkown source type '${mod.update_state.source_type}', skipping`);
+                            // Step C: full paginated walk through all releases.
+                            let release: Release | undefined = undefined;
+                            let { headers, status, body } = await query_gh_project_by_owner_project(
+                                url_match,
+                                '/releases?per_page=100',
+                            );
+                            if (status == '200' && body != undefined && Array.isArray(body)) {
+                                release = body.find((entry: Release) => entry.assets.find(asset_matches_digest) != undefined);
+
+                                if (release == undefined && headers?.get('link')?.includes('rel="last"')) {
+                                    let page = 2;
+                                    while (release == undefined && page < 10 && headers?.get('link')?.includes('rel="last"')) {
+                                        ({ headers, status, body } = await query_gh_project_by_url(
+                                            mod_source,
+                                            '/releases?per_page=100&page=' + page,
+                                        ));
+                                        if (status == '200' && body != undefined && Array.isArray(body)) {
+                                            release = body.find(
+                                                (entry: Release) => entry.assets.find(asset_matches_digest) != undefined,
+                                            );
+                                            page++;
+                                        } else {
+                                            live_log('W: Failed to fetch further releases for page ' + page, console.warn);
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+
+                            if (release != undefined) {
+                                const asset = release.assets.find(asset_matches_digest);
+                                if (asset != undefined) {
+                                    mod.source = asset.browser_download_url;
+                                    mod.update_state.version = release.tag_name;
+                                    if (extra_github_repos != undefined) {
+                                        mod.update_state.source_type = 'GITHUB';
+                                    }
+                                    live_log(
+                                        `Found mod source ${mod_name} at github repo ${owner}/${project} via release scan, using as future source.`,
+                                    );
+                                    break;
+                                } else {
+                                    live_log(
+                                        `W: Found matching release for mod ${mod_name}, but failed to find matching asset.`,
+                                        console.warn,
+                                    );
+                                }
+                            }
+
+                            break;
+                        }
+                        case 'CURSEFORGE': {
+                            // TBD
+                            break;
+                        }
+                        case 'MODRINTH': {
+                            // TBD
+                            break;
+                        }
+                        case 'OTHER': {
+                            // IDK
+                            break;
+                        }
+                        default: {
+                            live_log(`W: Encountered unkown source type '${mod.update_state.source_type}', skipping`, console.warn);
+                        }
                     }
                 }
+            } finally {
+                completed++;
+                render_progress();
             }
-        }
+        });
+    }
+
+    total = tasks.length;
+    if (total > 0) {
+        init_live_zone(2);
+        render_progress();
+        await run_pool(tasks, 8);
+        finish_live_zone();
     }
 
     if (!options.dry) {
@@ -972,12 +1046,13 @@ export async function apply_github_artifact(
 
     // Jar was recognized as a mod, update / add it via our tracked mods
     if (mod_obj != undefined) {
+        const mod_file_path = mod_obj.file_path.replace(MOD_BASE_DIR, mod_dir);
         log_debug(
             `Mod ${tag_primary(mod_id)} is a tracked mod, currently under ` +
-                `${tag_bracket(mod_obj.file_path)} ` +
+                `${tag_bracket(mod_file_path)} ` +
                 `with version ${tag_neutral(mod_obj.update_state.version ?? 'UNKNOWN')}.`,
         );
-        const old_jar = Bun.file(mod_obj.file_path);
+        const old_jar = Bun.file(mod_file_path);
         if (await old_jar.exists()) {
             await old_jar.delete();
         } else {
