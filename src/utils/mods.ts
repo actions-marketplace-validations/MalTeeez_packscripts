@@ -1,13 +1,11 @@
 import { ANNOTATED_FILE, MOD_BASE_DIR } from './config';
 import {
-    extract_file_from_zip,
     extract_text_from_zip,
     hash_file,
     is_folder_locked,
     read_from_file,
     rename_file,
     save_map_to_file,
-    scan_mods_folder,
     search_zip_for_string,
 } from './fs';
 import { dedup_array, type JsonObject } from './utils';

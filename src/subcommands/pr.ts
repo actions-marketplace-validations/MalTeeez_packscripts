@@ -37,6 +37,7 @@ export interface ApplyOptions {
     other_allowed_owners?: string[];
     wait_timeout_ms?: number;
     poll_interval_ms?: number;
+    pack_variant_name?: string;
 }
 
 // Orchestrator: build the dep graph, surface any failures with structured blocks, then apply nodes in order.
@@ -71,7 +72,7 @@ export async function apply_github_pr(source_url: string | undefined, options: A
         for (const pf of graph.preflight_failures) {
             log_err(`  ${tag_neutral(pf.dep_url)} - ${pf.result.reason}`);
         }
-    } else {
+    } else if (graph.owner_rejections.length < 1 && graph.resolve_failures.length < 1 && graph.apply_order.length < 1) {
         log_info("Preflight passed without any found dependencies.")
     }
 
@@ -134,7 +135,7 @@ export async function apply_github_pr(source_url: string | undefined, options: A
         return;
     }
 
-    await apply_nodes_in_order(graph, { dry: options.dry }, mod_map);
+    await apply_nodes_in_order(graph, { dry: options.dry, pack_variant_name: options.pack_variant_name }, mod_map);
     log_ok(`Applied ${tag_count(graph.apply_order.length)} node(s) successfully.`);
 }
 

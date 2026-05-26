@@ -630,7 +630,7 @@ export function topo_postorder(graph: DepGraph): string[] {
 }
 
 // Apply artifacts in graph.apply_order using version.ts's apply_github_artifact.
-export async function apply_nodes_in_order(graph: DepGraph, options: { dry: boolean }, mod_map: Map<string, mod_object>): Promise<void> {
+export async function apply_nodes_in_order(graph: DepGraph, options: { dry: boolean; pack_variant_name?: string }, mod_map: Map<string, mod_object>): Promise<void> {
     for (const id of graph.apply_order) {
         const node = graph.nodes.get(id);
         if (node == undefined) continue;

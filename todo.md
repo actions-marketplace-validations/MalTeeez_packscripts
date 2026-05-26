@@ -9,28 +9,20 @@
 - ci pack fulltests
 
 ### ci notes
-- We need to limit jobs to the newest one with githubs: 
-``` 
-concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
-```
-
-- We have to wait on required PRs with running workflows, but only if a build_job name is provided or this is the first workflow. Otherwise just use the workflows from a previous commit.
 - We have to block merging until required PRs are merged, even if we can pull an artifact from the required PR and it works with that - we dont want to release something that depends on something thats not even available yet.
   > Fullpack test runs, uses artifacts from open PRs freely
   > If fullpack passes, a second job runs and validates that all cross-repo deps are either merged or have a released version available
   > Only if both pass does the PR get a green status that allows merging
-# GTNH Fullpack CI - TODOs
 
-## Daily Build Pipeline
+
+#### Daily Build Pipeline
 
 - [ ] Gate `:latest` publish behind fullpack test passing — daily image must not be published if the fullpack test fails
   > If a broken daily is published, every PR test running against `:latest` will fail, and it becomes impossible to distinguish "this PR broke it" from "the daily was already broken." The gate ensures `:latest` always represents a known-good state.
 - [ ] Daily fullpack test must build from scratch (not based on an existing daily image)
   > Testing the daily by patching an older daily would mask incompatibilities introduced between the two. The daily test needs to reflect exactly what would be released.
 
-## Dep Graph Traversal (Cross-Repo)
+#### Dep Graph Traversal (Cross-Repo)
 
 - [ ] Get all PRs merged to the initial repo since the last daily (via GitHub API, using merge timestamp)
   > A PR can implicitly depend on changes that landed on default since the last daily without explicitly linking them — for example by branching from default after another PR merged, inheriting its changes, and therefore requiring that PR's cross-repo dependencies too. Collecting all merged PRs since the last daily and following their links catches these implicit transitive dependencies that no explicit linking syntax would ever cover.
@@ -41,7 +33,7 @@ concurrency:
 - [ ] Build/grab artifact from each resolved commit
 - [ ] Apply all artifacts on top of latest daily in dependency order
 
-## Pre-flight Checks (Same-Repo Deps)
+#### Pre-flight Checks (Same-Repo Deps)
 
 Run these per-node during traversal, not just at the root PR — required PRs can themselves have same-repo deps.
 
@@ -55,7 +47,7 @@ Run these per-node during traversal, not just at the root PR — required PRs ca
   > There is no defined policy for resolving deps that target arbitrary feature branches. Failing loudly forces the developer to restructure rather than silently producing an incorrect test.
 - [ ] If all pre-flight checks pass, same-repo deps do not enter graph traversal — they are already present in the initial PR's artifact
 
-## Merged-But-Unreleased Dep Handling
+#### Merged-But-Unreleased Dep Handling
 
 - [ ] If a required PR has been merged but its repo hasn't cut a new release/tag yet, use the post-merge commit artifact from default branch CI instead
   > Every commit to default triggers a CI build, so a post-merge artifact should exist even if no release has been tagged. This covers the common case of teams batching releases over several days.
@@ -63,14 +55,14 @@ Run these per-node during traversal, not just at the root PR — required PRs ca
 - [ ] If a required PR has been merged and a tag exists but the release is not yet published: fail with a clear message (do not poll indefinitely)
   > A tag without a published release means the artifact is not yet in a consumable state. Polling indefinitely would stall CI unpredictably; failing fast with a clear message lets the developer know exactly what is blocking them.
 
-## Upward Failure Propagation
+#### Upward Failure Propagation
 
 - [ ] If the most recent commit of a required PR's workflow fails, fail the dependent PR's CI as well
   > Testing against a broken dependency would produce meaningless results — failures could be caused by the dependency, not the PR under test. There is no point running the fullpack test in this state.
 - [ ] Error message should link directly to the failing workflow on the dependency PR
   > Without a direct link, the developer has to manually hunt down which dependency is broken and why. A direct link makes the failure immediately actionable.
 
-## Waiting on Dep PR Artifacts
+#### Waiting on Dep PR Artifacts
 
 - [ ] If a required PR's workflow has not yet produced an artifact, wait with a timeout
   > The dependency's CI may simply still be running. Failing immediately would cause unnecessary re-triggers; a short wait covers the normal case of a dependency that is mid-build.
@@ -78,7 +70,7 @@ Run these per-node during traversal, not just at the root PR — required PRs ca
 - [ ] On failure/timeout, developer must manually re-trigger (document this expectation)
   > Automatic retries across a chain of dependent PRs would be complex and unpredictable. Manual re-trigger is simple and keeps the developer in control of when the test runs.
 
-## Constraints / Guardrails
+#### Constraints / Guardrails
 
 - [ ] Cross-repo linked PRs must be from the same GitHub org/owner — other owners are rejected by default (already noted as solved, but ensure it's enforced explicitly with a clear error)
   > Allowing external forks to inject artifacts into the test pipeline would be a security risk — arbitrary code could be introduced into the fullpack test environment.

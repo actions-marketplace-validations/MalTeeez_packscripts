@@ -520,7 +520,7 @@ const commands: Record<string, CommandDefinition> = {
     },
     pr_apply: {
         description: 'Fetch and apply a mod build artifact from a GitHub PR, recursively resolving cross-repo deps and merged-since-daily PRs',
-        usage: 'pr apply <pr_url> [--dry] [--build_job <name>]... [--artifact_name <part>]... [--allow_failed_workflows] [--allow_external_owners] [--other_allowed_owner <owner>]... [--wait_timeout <seconds>] [--poll_interval <seconds>] [--debug]',
+        usage: 'pr apply <pr_url> [--dry] [--build_job <name>]... [--artifact_name <part>]... [--allow_failed_workflows] [--allow_external_owners] [--other_allowed_owner <owner>]... [--wait_timeout <seconds>] [--poll_interval <seconds>] [pack_variant <variant name>] [--debug]',
         is_subcommand: true,
         handler: async (args) => {
             if (args.includes('--help') || args.includes('-h')) {
@@ -531,6 +531,7 @@ const commands: Record<string, CommandDefinition> = {
             // Parse value-flags first, then collect positionals.
             let wait_timeout_seconds: number | undefined;
             let poll_interval_seconds: number | undefined;
+            let pack_variant_name: string | undefined;
             const build_jobs: string[] = [];
             const artifact_names: string[] = [];
             const other_allowed_owners: string[] = [];
@@ -539,6 +540,8 @@ const commands: Record<string, CommandDefinition> = {
                 const arg = args[i];
                 if (arg === '--build_job' && args[i + 1] != undefined) {
                     build_jobs.push(args[++i] as string);
+                } else if (arg === '--pack_variant' && args[i + 1] != undefined) {
+                    pack_variant_name = args[++i];
                 } else if (arg === '--artifact_name' && args[i + 1] != undefined) {
                     artifact_names.push(args[++i] as string);
                 } else if (arg === '--other_allowed_owner' && args[i + 1] != undefined) {
@@ -565,6 +568,7 @@ const commands: Record<string, CommandDefinition> = {
                 other_allowed_owners: other_allowed_owners.length > 0 ? other_allowed_owners : undefined,
                 wait_timeout_ms,
                 poll_interval_ms,
+                pack_variant_name
             });
             return;
         },

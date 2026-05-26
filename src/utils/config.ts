@@ -78,7 +78,10 @@ let config_file_exists: boolean;
 let config: Config;
 
 const _workdir = Bun.env.PACKSCRIPTS_WORKDIR;
-if (_workdir) process.chdir(_workdir);
+if (_workdir) {
+    console.debug(`Found predefined workdir at '${_workdir}', changing base directory.`)
+    process.chdir(_workdir);
+}
 
 const _config_env = Bun.env.PACKSCRIPTS_CONFIG;
 if (_config_env) {
@@ -93,7 +96,6 @@ if (_config_env) {
         process.chdir(path.dirname(_abs));
     }
 } else {
-    // Default: walk up to find packscripts.json and chdir to its directory.
     find_and_chdir_to_config(CONFIG_FILE);
     config_file_exists = await Bun.file(CONFIG_FILE).exists();
     config = config_file_exists ? await Bun.file(CONFIG_FILE).json() : ({} as Config);

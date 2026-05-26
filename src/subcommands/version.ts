@@ -1,5 +1,22 @@
-import { ANNOTATED_FILE, DOWNLOAD_TEMP_DIR, DOWNLOAD_UNDO_DIR, GITHUB_API_KEY, MOD_BASE_DIR } from '../utils/config';
-import { assert_gh_key, download_file, filter_assets, gh_request, print_gh_ratelimits, query_gh_project_by_owner_project, query_gh_project_by_url, SOURCE_API_KEYS } from '../utils/fetch';
+import {
+    ANNOTATED_FILE,
+    DOWNLOAD_TEMP_DIR,
+    DOWNLOAD_UNDO_DIR,
+    GITHUB_API_KEY,
+    MOD_BASE_DIR,
+    PACKAGING,
+    RELATIVE_INSTANCE_DIRECTORY,
+} from '../utils/config';
+import {
+    assert_gh_key,
+    download_file,
+    filter_assets,
+    gh_request,
+    print_gh_ratelimits,
+    query_gh_project_by_owner_project,
+    query_gh_project_by_url,
+    SOURCE_API_KEYS,
+} from '../utils/fetch';
 import {
     collect_files_from_zip,
     extract_file_from_zip,
@@ -10,13 +27,44 @@ import {
     save_list_to_file,
     save_map_to_file,
 } from '../utils/fs';
-import { are_all_mods_unlocked, default_mod_object, is_mod_ignored_by_name, parse_mod_details, read_saved_mods, type mod_object, type SourceType } from '../utils/mods';
-import { CLIColor, clone, finish_live_zone, hash_buffer, init_live_zone, is_finished, live_log, render_md, rev_replace_all, update_live_zone } from '../utils/utils';
+import {
+    are_all_mods_unlocked,
+    default_mod_object,
+    is_mod_ignored_by_name,
+    parse_mod_details,
+    read_saved_mods,
+    type mod_object,
+    type SourceType,
+} from '../utils/mods';
+import {
+    CLIColor,
+    clone,
+    finish_live_zone,
+    hash_buffer,
+    init_live_zone,
+    is_finished,
+    live_log,
+    render_md,
+    rev_replace_all,
+    update_live_zone,
+} from '../utils/utils';
 import { mkdir, rename, rm } from 'node:fs/promises';
 import { toNamespacedPath } from 'node:path';
 import { parse_gh_url } from '../utils/sources';
 import { get_dl_url_from_github_url, type Artifact } from './pr';
-import { log_debug, log_err, log_info, log_ok, log_step, log_warn, tag_bracket, tag_count, tag_dim, tag_neutral, tag_primary } from '../utils/log';
+import {
+    log_debug,
+    log_err,
+    log_info,
+    log_ok,
+    log_step,
+    log_warn,
+    tag_bracket,
+    tag_count,
+    tag_dim,
+    tag_neutral,
+    tag_primary,
+} from '../utils/log';
 
 interface ReleaseAsset {
     url: string;
@@ -71,7 +119,9 @@ function render_wide_release(
     const age_days = age_days_raw.toFixed(2);
     const padding = rev_replace_all(' '.repeat(options.version_padding - release.tag_name.length), '   ', ' . ');
     const release_name =
-        release.name && release.name !== release.tag_name ? ` ${CLIColor.FgGray}·${CLIColor.Reset} ${CLIColor.FgWhite2}${release.name}${CLIColor.Reset}` : '';
+        release.name && release.name !== release.tag_name
+            ? ` ${CLIColor.FgGray}·${CLIColor.Reset} ${CLIColor.FgWhite2}${release.name}${CLIColor.Reset}`
+            : '';
     const badges =
         (release.draft ? ` ${CLIColor.BgYellow0}${CLIColor.FgBlack}${CLIColor.Bright} DRAFT ${CLIColor.Reset}` : '') +
         (release.prerelease ? ` ${CLIColor.BgMagenta0}${CLIColor.FgWhite}${CLIColor.Bright} PRE ${CLIColor.Reset}` : '');
@@ -313,7 +363,9 @@ export async function switch_version_of_mod(
                     mod.update_state.version = version;
                     mod.update_state.last_updated_at = new Date(Date.now()).toISOString();
                     if (is_base_required) {
-                        console.info(`Mod required by basegame (${mod_id}) changed in version. Don't forget to also change it externally, if required.`);
+                        console.info(
+                            `Mod required by basegame (${mod_id}) changed in version. Don't forget to also change it externally, if required.`,
+                        );
                     }
                 })
                 .catch(() => console.warn(`W: Failed to move switched jar ${file_name} for mod ${mod_id} into the mod directory.`));
@@ -362,7 +414,9 @@ export async function restore_to_asset_versions(
             continue;
         }
 
-        let { headers, status, body } = await query_gh_project_by_url(mod.source, '/releases/tags/' + mod.update_state.version, undefined, [404]);
+        let { headers, status, body } = await query_gh_project_by_url(mod.source, '/releases/tags/' + mod.update_state.version, undefined, [
+            404,
+        ]);
         if (status === '200' && body != undefined && body.assets != undefined && Array.isArray(body.assets)) {
             let assets = body.assets as Array<{ browser_download_url: string; name: string; size: any }>;
             let [file_name, dl_url, size] = filter_assets(assets, mod.update_state.file_pattern);
@@ -429,7 +483,10 @@ export async function restore_to_asset_versions(
         let running_downloads = 0;
         let completed_downloads = 0;
         const full_dls = to_update_mods.length;
-        const download_map: Map<string, { response: Promise<string>; start_time: number; file_name: string; is_base_required: boolean; mod_obj: mod_object }> = new Map();
+        const download_map: Map<
+            string,
+            { response: Promise<string>; start_time: number; file_name: string; is_base_required: boolean; mod_obj: mod_object }
+        > = new Map();
         const downloaded_mods: Map<string, { file_name: string; is_base_required: boolean; mod_obj: mod_object }> = new Map();
         console.log(`\nRedownloading ${full_dls} mods...`);
 
@@ -532,7 +589,9 @@ export async function restore_to_asset_versions(
                     await rename(`${DOWNLOAD_TEMP_DIR}/${file_name}`, new_mod_path)
                         .then(async () => {
                             if (!(await Bun.file(new_mod_path).exists())) {
-                                console.warn(`W: Failed to move newer file for ${mod_id} (${file_name}) to mod directory. Reverting to previous version.`);
+                                console.warn(
+                                    `W: Failed to move newer file for ${mod_id} (${file_name}) to mod directory. Reverting to previous version.`,
+                                );
                                 await rename(`${DOWNLOAD_UNDO_DIR}/${old_mod_jar}`, mod.file_path).catch((err) => {
                                     console.warn(`W: Failed to move the older jar for mod ${mod_id} back from the undo dir into the mod dir.`);
                                 });
@@ -549,7 +608,9 @@ export async function restore_to_asset_versions(
                                 mod.file_path = new_mod_path;
                                 mod.update_state.last_updated_at = new Date(Date.now()).toISOString();
                                 if (is_base_required) {
-                                    console.info(`Mod required by basegame (${mod_id}) was changed. Don't forget to also change it externally, if required.`);
+                                    console.info(
+                                        `Mod required by basegame (${mod_id}) was changed. Don't forget to also change it externally, if required.`,
+                                    );
                                 }
                             }
                         })
@@ -625,7 +686,9 @@ export async function verify_and_refresh_source_links(
 
                 if (scored.length === 0) continue;
 
-                log_info(`Tentatively found ${scored.length} repo(s) for mod without source ${tag_primary(mod_name)}, verifying against releases...`);
+                log_info(
+                    `Tentatively found ${scored.length} repo(s) for mod without source ${tag_primary(mod_name)}, verifying against releases...`,
+                );
                 available_repo_map.set(
                     mod_name,
                     scored.map((entry) => entry.repo.html_url + '/releases/tag/pleasematchmeheart'),
@@ -668,20 +731,22 @@ export async function verify_and_refresh_source_links(
                         // We don't care about the URL format — just need owner/project and the digest.
                         const digest = mod.update_state.sha256_sum;
                         function asset_matches_digest(asset: ReleaseAsset) {
-                            return asset.digest != null && 
-                            asset.digest.slice(7) === digest;
-                        } 
+                            return asset.digest != null && asset.digest.slice(7) === digest;
+                        }
 
                         let release: Release | undefined = undefined;
                         let { headers, status, body } = await query_gh_project_by_owner_project(url_match, '/releases?per_page=100');
                         if (status == '200' && body != undefined && Array.isArray(body)) {
-                            log_debug(`Found ${body.length} releases for mod ${mod_name}.`)
+                            log_debug(`Found ${body.length} releases for mod ${mod_name}.`);
                             release = body.find((entry: Release) => entry.assets.find(asset_matches_digest) != undefined);
 
                             if (release == undefined && headers?.get('link')?.includes('rel="last"')) {
                                 let page = 2;
                                 while (release == undefined && page < 10 && headers?.get('link')?.includes('rel="last"')) {
-                                    ({ headers, status, body } = await query_gh_project_by_url(mod_source, '/releases?per_page=100&page=' + page));
+                                    ({ headers, status, body } = await query_gh_project_by_url(
+                                        mod_source,
+                                        '/releases?per_page=100&page=' + page,
+                                    ));
                                     if (status == '200' && body != undefined && Array.isArray(body)) {
                                         release = body.find((entry: Release) => entry.assets.find(asset_matches_digest) != undefined);
                                         page++;
@@ -694,7 +759,7 @@ export async function verify_and_refresh_source_links(
                         }
 
                         if (release != undefined) {
-                            log_debug(`Found matching release for ${mod_name} with version ${release.tag_name}.`)
+                            log_debug(`Found matching release for ${mod_name} with version ${release.tag_name}.`);
                             const asset = release.assets.find(asset_matches_digest);
                             if (asset != undefined) {
                                 mod.source = asset.browser_download_url;
@@ -740,7 +805,7 @@ export async function verify_and_refresh_source_links(
 //#region switch indev
 export async function switch_to_indev_version(
     source_url: string | undefined,
-    options: { dry: boolean; build_job?: string; artifact_name?: string; allow_failed_workflows?: boolean },
+    options: { dry: boolean; build_job?: string; artifact_name?: string; allow_failed_workflows?: boolean; pack_variant_name?: string },
     mod_map?: Map<string, mod_object>,
 ) {
     // Initial assertions
@@ -752,12 +817,20 @@ export async function switch_to_indev_version(
     mod_map = mod_map ?? (await read_saved_mods(ANNOTATED_FILE));
 
     const url_match = parse_gh_url(source_url);
-    const artifact = await get_dl_url_from_github_url(source_url, options.build_job, options.artifact_name, 10, options.allow_failed_workflows ?? false);
+    const artifact = await get_dl_url_from_github_url(
+        source_url,
+        options.build_job,
+        options.artifact_name,
+        10,
+        options.allow_failed_workflows ?? false,
+    );
     if (artifact == undefined || url_match == undefined || url_match.primary == undefined) {
         log_err(`Failed to find a download url from source url ${tag_bracket(source_url)}.`);
         throw Error();
     } else {
-        log_info(`Using artifact ${tag_primary(artifact.name)} ${tag_bracket(`${(artifact.size_in_bytes / 1024).toFixed(0)} KB, ${artifact.digest.slice(0, 12)}…`)}`);
+        log_info(
+            `Using artifact ${tag_primary(artifact.name)} ${tag_bracket(`${(artifact.size_in_bytes / 1024).toFixed(0)} KB, ${artifact.digest.slice(0, 12)}…`)}`,
+        );
     }
 
     let { owner, project, primary, secondary, key, asset, fifth } = url_match;
@@ -769,7 +842,11 @@ export async function switch_to_indev_version(
     await apply_github_artifact(artifact, options, mod_map);
 }
 
-export async function apply_github_artifact(artifact: Artifact, options: { dry: boolean }, mod_map: Map<string, mod_object>) {
+export async function apply_github_artifact(
+    artifact: Artifact,
+    options: { dry: boolean; pack_variant_name?: string },
+    mod_map: Map<string, mod_object>,
+) {
     if (options.dry) return;
 
     const temp_dir = DOWNLOAD_TEMP_DIR.replace(/\/$/m, '') + '/indev';
@@ -783,7 +860,13 @@ export async function apply_github_artifact(artifact: Artifact, options: { dry: 
     // Actually download the artifact, should always be a zip or a jar (also a zip :KEKW:)
     log_step('Downloading artifact...');
     const is_zip = !artifact.name.endsWith('.jar');
-    await download_file(artifact.archive_download_url, 'GITHUB', temp_dir, artifact.name + (is_zip ? '.zip' : ''), SOURCE_API_KEYS.get('GITHUB'));
+    await download_file(
+        artifact.archive_download_url,
+        'GITHUB',
+        temp_dir,
+        artifact.name + (is_zip ? '.zip' : ''),
+        SOURCE_API_KEYS.get('GITHUB'),
+    );
     const zip_file_name = temp_dir + '/' + artifact.name + (is_zip ? '.zip' : '');
     const file = Bun.file(zip_file_name);
 
@@ -795,7 +878,9 @@ export async function apply_github_artifact(artifact: Artifact, options: { dry: 
         log_err(`Size of downloaded file differs, got ${tag_count(file.size)} against expected ${tag_count(artifact.size_in_bytes)}.`);
         return;
     } else if ((await hash_buffer(await file.bytes(), 'sha256')) !== artifact.digest) {
-        log_err(`Checksum of file differs, got ${tag_dim(await hash_buffer(await file.bytes(), 'sha256'))} against expected ${tag_dim(artifact.digest)}.`);
+        log_err(
+            `Checksum of file differs, got ${tag_dim(await hash_buffer(await file.bytes(), 'sha256'))} against expected ${tag_dim(artifact.digest)}.`,
+        );
         return;
     } else if (!(await is_zip_file(file))) {
         log_err('Downloaded file matches expected but is not a zip / jar file. We can only handle zip / jar files for now.');
@@ -826,8 +911,55 @@ export async function apply_github_artifact(artifact: Artifact, options: { dry: 
     }
 
     // Check modid of jar for switching out with existing version
-    const { id: mod_id, version: mod_version, wants: mod_wants, hash: mod_hash, other_mod_ids: mod_other_ids } = await parse_mod_details(jar_file_path);
-    let jar_mod_path = MOD_BASE_DIR + '/' + jar_file;
+    const {
+        id: mod_id,
+        version: mod_version,
+        wants: mod_wants,
+        hash: mod_hash,
+        other_mod_ids: mod_other_ids,
+    } = await parse_mod_details(jar_file_path);
+
+    // Rewrite target path based on package variant if we were given one
+    let mod_dir = MOD_BASE_DIR;
+    if (options.pack_variant_name != undefined) {
+        if (PACKAGING == undefined) {
+            throw Error('Packaging config not yet initialized, but we were given a target pack variant.');
+        }
+        const pack_variant = PACKAGING.PACK_VARIANTS[options.pack_variant_name];
+        if (pack_variant == undefined) {
+            throw Error(`Failed to find pack variant named '${options.pack_variant_name}'. Have: [${Object.keys(PACKAGING.PACK_VARIANTS)}].`);
+        }
+
+        // Taken from filter_and_plan_files() in package.ts
+        const combined_filters: Array<{ filter_path: string; include_as: string | undefined }> = [
+            ...pack_variant.TRACK_INCLUDE_PATHS.map((include_filter) => {
+                return {
+                    filter_path: include_filter.path.replace(new RegExp(`^${RELATIVE_INSTANCE_DIRECTORY}`, 'm'), ''),
+                    include_as: include_filter.include_as,
+                };
+            }),
+            ...pack_variant.FORCE_INCLUDE_PATHS.map((include_filter) => {
+                return {
+                    filter_path: include_filter.path.replace(new RegExp(`^${RELATIVE_INSTANCE_DIRECTORY}`, 'm'), ''),
+                    include_as: include_filter.include_as,
+                };
+            }),
+        ];
+        const stripped_mod_dir = MOD_BASE_DIR.replace(new RegExp(`^${RELATIVE_INSTANCE_DIRECTORY}`, 'm'), '');
+        for (const filter of combined_filters) {
+            if (filter.filter_path === '') continue;
+            if (stripped_mod_dir.startsWith(filter.filter_path)) {
+                mod_dir =
+                    RELATIVE_INSTANCE_DIRECTORY +
+                    (filter.include_as != undefined
+                        ? stripped_mod_dir.replace(new RegExp(`^${filter.filter_path}`, 'm'), filter.include_as)
+                        : stripped_mod_dir);
+                break;
+            }
+        }
+    }
+
+    let jar_mod_path = mod_dir + '/' + jar_file;
 
     // Jar could not be recognized as a mod, add it as something unknown
     if (mod_id == undefined) {
@@ -888,6 +1020,6 @@ export async function apply_github_artifact(artifact: Artifact, options: { dry: 
     log_ok(
         `Finished updating mod ${tag_primary(mod_id)} ` +
             `to indev version ${tag_neutral(final_version)} ` +
-            `${tag_bracket(jar_mod_path.replace(MOD_BASE_DIR + '/', ''))}.`,
+            `${tag_bracket(jar_mod_path.replace(mod_dir + '/', ''))}.`,
     );
 }
