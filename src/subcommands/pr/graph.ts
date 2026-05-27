@@ -17,6 +17,7 @@ export interface PRMeta {
     pr_id: string;          // 'owner/project#N'
     pr_url: string;
     merged: boolean;
+    closed: boolean;
     merged_at?: string;
     merge_commit_sha?: string;
     head: { ref: string; sha: string };
@@ -24,7 +25,7 @@ export interface PRMeta {
     body: string;
 }
 
-export type PRStateKind = 'open' | 'merged_with_release' | 'merged_unreleased' | 'merged_tag_unpublished';
+export type PRStateKind = 'open' | 'closed_unmerged' | 'merged_with_release' | 'merged_unreleased' | 'merged_tag_unpublished';
 
 export interface DepNode {
     id: string;                     // 'owner/project#N' for PR nodes, 'owner/project@sha' for default-commit nodes
@@ -114,6 +115,7 @@ export async function fetch_pr_meta(pr_url: string, cache: GhCache): Promise<PRM
         pr_id: cache_key,
         pr_url,
         merged: Boolean(body.merged),
+        closed: body.state === 'closed',
         merged_at: body.merged_at ?? undefined,
         merge_commit_sha: body.merge_commit_sha ?? undefined,
         head: { ref: body.head?.ref ?? '', sha: body.head?.sha ?? '' },
@@ -156,12 +158,13 @@ async function fetch_release_for_tag(repo_url: string, tag: string, cache: GhCac
 }
 
 /**
- * Classify the state of a PR: open, merged with published release, merged with tag-but-unpublished, or merged-unreleased.
+ * Classify the state of a PR: open, closed-without-merge, merged with published release, merged with tag-but-unpublished, or merged-unreleased.
  * 
  * Logic: 
  * 1. Fetch `/pulls/<n>` (cache by `owner/project#N`).
- * 2. If `merged === false` → `{ state: 'open' }`.
- * 3. If `merged === true`:
+ * 2. If `merged === false` and `body.state === 'closed'` → `{ state: 'closed_unmerged' }`.
+ * 3. If `merged === false` → `{ state: 'open' }`.
+ * 4. If `merged === true`:
  *    - Walk releases (`/releases?per_page=100`) looking for one whose resolved tag commit equals `merge_commit_sha` OR whose `target_commitish` resolves to a SHA equal to `merge_commit_sha`. Tag→commit resolution per `AGENTS.md → Tag → commit resolution`.
  *    - If found and `draft === false` → `{ state: 'merged_with_release', release_tag, release_html_url }`.
  *    - If found but `draft === true`, OR a git tag exists (`/git/refs/tags/<tag>`) for the version-string but no release entry → `{ state: 'merged_tag_unpublished', tag }`.
@@ -176,6 +179,10 @@ export async function classify_pr_state(
     log_debug(`Classifying ${pr.pr_id}: merged=${pr.merged}${pr.merge_commit_sha ? `, merge_sha=${pr.merge_commit_sha.slice(0, 7)}` : ''}`);
 
     if (!pr.merged) {
+        if (pr.closed) {
+            log_debug(`${pr.pr_id} -> closed_unmerged`);
+            return { pr, state: 'closed_unmerged' };
+        }
         log_debug(`${pr.pr_id} -> open`);
         return { pr, state: 'open' };
     }

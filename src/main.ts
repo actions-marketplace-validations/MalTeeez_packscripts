@@ -574,8 +574,8 @@ const commands: Record<string, CommandDefinition> = {
         },
     },
     pr_gate: {
-        description: 'Validate every cross-repo dep of the given PR is merged with a published release; exit 0 = mergeable',
-        usage: 'pr gate <pr_url> [--allow_external_owners] [--other_allowed_owner <owner>]... [--build_job <name>]... [--debug]',
+        description: 'Validate every cross-repo dep of the given PR is merged with a published release; exit 0 = mergeable. Pass --allow_all_merged to also accept merged-but-unreleased deps.',
+        usage: 'pr gate <pr_url> [--allow_external_owners] [--other_allowed_owner <owner>]... [--build_job <name>]... [--allow_all_merged] [--debug]',
         is_subcommand: true,
         handler: async (args) => {
             if (args.includes('--help') || args.includes('-h')) {
@@ -601,6 +601,7 @@ const commands: Record<string, CommandDefinition> = {
                 build_jobs: build_jobs.length > 0 ? build_jobs : undefined,
                 allow_external_owners: args.includes('--allow_external_owners'),
                 other_allowed_owners: other_allowed_owners.length > 0 ? other_allowed_owners : undefined,
+                allow_all_merged: args.includes('--allow_all_merged'),
             });
             return;
         },

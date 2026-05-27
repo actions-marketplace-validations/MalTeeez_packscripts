@@ -86,8 +86,8 @@ Available commands:
                         Usage: pr <apply|gate|deps>
   pr apply              Fetch and apply a mod build artifact from a GitHub PR, recursively resolving cross-repo deps and merged-since-daily PRs
                         Usage: pr apply <pr_url> [--dry] [--build_job <name>]... [--artifact_name <part>]... [--allow_failed_workflows] [--allow_external_owners] [--other_allowed_owner <owner>]... [--wait_timeout <seconds>] [--poll_interval <seconds>] [--debug]
-  pr gate               Validate every cross-repo dep of the given PR is merged with a published release; exit 0 = mergeable
-                        Usage: pr gate <pr_url> [--allow_external_owners] [--other_allowed_owner <owner>]... [--build_job <name>]... [--debug]
+  pr gate               Validate every cross-repo dep of the given PR is merged with a published release; exit 0 = mergeable. Pass --allow_all_merged to also accept merged-but-unreleased deps.
+                        Usage: pr gate <pr_url> [--allow_external_owners] [--other_allowed_owner <owner>]... [--build_job <name>]... [--allow_all_merged] [--debug]
   pr deps               Download direct dependencies of a PR and build a JSON metadata manifest
                         Usage: pr deps <pr_url> --target_dir <dir> --jar_suffix <suffix> [--dry] [--build_job <name>]... [--artifact_name <part>]... [--allow_external_owners] [--other_allowed_owner <owner>]... [--debug]
 ```
