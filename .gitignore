@@ -10,3 +10,5 @@ packscripts-win.exe
 main.js.map
 .packscripts.env.json
 packscripts.json
+.opencode
+.claude

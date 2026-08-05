@@ -13,6 +13,7 @@ import {
 import { mkdir, rm } from 'node:fs/promises';
 import { download_file } from '../utils/fetch';
 import { expandOid, readBlob, resolveRef, TREE, walk } from 'isomorphic-git';
+import { git_diff_tree, git_list_tree, git_read_blob_at, git_resolve_ref, is_git_available, type git_tree_diff_entry } from '../utils/git';
 import { bundle_files_to_zip, path_is_directory } from '../utils/fs';
 import { sync } from 'fast-glob';
 import { CLIColor, finish_live_zone, hash_buffer, init_live_zone, update_live_zone } from '../utils/utils';
@@ -134,14 +135,57 @@ function create_worker_pool(total: number, worker_count: number, options: { live
 }
 
 //#region general helpers
-export async function is_git_available(dir: string): Promise<boolean> {
-    try {
-        const proc = Bun.spawn(['git', 'rev-parse', '--git-dir'], { cwd: dir });
-        return (await proc.exited) === 0;
-    } catch {
-        console.warn('W: For some (weird) reason, git is not availble in this cli context. Falling back to a slower approach.');
-        return false;
-    }
+/**
+ * Walk a commits tree with isomorphic-git, for when the git binary isn't available.
+ * Can't read packfiles > 2 GiB, see utils/git.ts.
+ */
+async function walk_tree_oids_with_isomorphic_git(commit_sha: string): Promise<Map<string, string>> {
+    const file_oids: Map<string, string> = new Map();
+
+    await walk({
+        fs: fs,
+        dir: RELATIVE_INSTANCE_DIRECTORY,
+        trees: [TREE({ ref: commit_sha })],
+        map: async (filepath, [entry]) => {
+            if (!entry) return null;
+            const type = await entry.type();
+            if (type === 'tree') return undefined;
+            file_oids.set(filepath, await entry.oid());
+            return null;
+        },
+    });
+
+    return file_oids;
+}
+
+/**
+ * Diff two commits with isomorphic-git, for when the git binary isn't available.
+ * Can't read packfiles > 2 GiB, see utils/git.ts.
+ */
+async function diff_trees_with_isomorphic_git(base_commit_sha: string, target_commit_sha: string): Promise<git_tree_diff_entry[]> {
+    return await walk({
+        fs: fs,
+        dir: RELATIVE_INSTANCE_DIRECTORY,
+        trees: [TREE({ ref: base_commit_sha }), TREE({ ref: target_commit_sha })],
+        map: async (filepath, [a, b]) => {
+            if (filepath === '.') return;
+
+            const type = await (a ?? b)?.type();
+            if (type === 'tree') return;
+
+            const a_oid = await a?.oid();
+            const b_oid = await b?.oid();
+
+            if (a_oid === b_oid) return;
+
+            return {
+                filepath,
+                status: !a ? 'added' : !b ? 'deleted' : 'modified',
+                old_oid: a_oid,
+                new_oid: b_oid,
+            };
+        },
+    });
 }
 
 async function get_lfs_oids(dir: string, target_commits: string[]): Promise<Map<string, { hash: string; size: number }>> {
@@ -309,6 +353,9 @@ async function read_unsup_versions_from_manifest(pack_variant_name: string): Pro
 
 async function resolve_to_correct_git_ref(initial_ref: string): Promise<string> {
     if (PACKAGING == undefined) throw Error('Config not yet initialized.');
+
+    const git_ref = await git_resolve_ref(RELATIVE_INSTANCE_DIRECTORY, initial_ref);
+    if (git_ref != undefined) return git_ref;
 
     try {
         return await resolveRef({ fs: fs, dir: RELATIVE_INSTANCE_DIRECTORY, ref: initial_ref });
@@ -478,16 +525,22 @@ async function update_file_modmap_from_gitrefs(
         to_update_map = new Map();
     }
 
+    const annotated_file_path = ANNOTATED_FILE.replace(new RegExp(`^${RELATIVE_INSTANCE_DIRECTORY}`, 'm'), '');
+
     for (const commit_hash of commit_hashes) {
-        const blob = await readBlob({
-            fs: fs,
-            dir: RELATIVE_INSTANCE_DIRECTORY,
-            filepath: ANNOTATED_FILE.replace(new RegExp(`^${RELATIVE_INSTANCE_DIRECTORY}`, 'm'), ''),
-            oid: commit_hash,
-        }).catch(() => undefined);
+        const blob =
+            (await git_read_blob_at(RELATIVE_INSTANCE_DIRECTORY, commit_hash, annotated_file_path)) ??
+            (
+                await readBlob({
+                    fs: fs,
+                    dir: RELATIVE_INSTANCE_DIRECTORY,
+                    filepath: annotated_file_path,
+                    oid: commit_hash,
+                }).catch(() => undefined)
+            )?.blob;
         if (blob == undefined) continue;
 
-        const mod_map = await read_saved_mods(ANNOTATED_FILE, blob.blob);
+        const mod_map = await read_saved_mods(ANNOTATED_FILE, blob);
 
         for (const [mod_id, mod] of mod_map.entries()) {
             to_update_map.set(mod.file_path, { mod_id, mod });
@@ -704,19 +757,7 @@ export async function build_bootstrap(commit_sha: string, input_tag: string | un
     const short_commit_sha = commit_sha.slice(0, 7);
 
     console.info('Walking index of git blobs...');
-    const file_oids: Map<string, string> = new Map();
-    await walk({
-        fs: fs,
-        dir: RELATIVE_INSTANCE_DIRECTORY,
-        trees: [TREE({ ref: commit_sha })],
-        map: async (filepath, [entry]) => {
-            if (!entry) return null;
-            const type = await entry.type();
-            if (type === 'tree') return undefined;
-            file_oids.set(filepath, await entry.oid());
-            return null;
-        },
-    });
+    const file_oids = (await git_list_tree(RELATIVE_INSTANCE_DIRECTORY, commit_sha)) ?? (await walk_tree_oids_with_isomorphic_git(commit_sha));
 
     console.info('Building bootstrap for git ref ', commit_sha, ' from ', file_oids.size, ' git objects...');
     const git_available = await is_git_available(RELATIVE_INSTANCE_DIRECTORY);
@@ -977,34 +1018,9 @@ export async function build_version_for_diff(
         console.info(`Building diff, with ${base_commit_sha.slice(0, 7)} as base -> and ${target_commit_sha.slice(0, 7)} as target...`);
         const lfs_oids = git_available ? await get_lfs_oids(RELATIVE_INSTANCE_DIRECTORY, [base_commit_sha, target_commit_sha]) : undefined;
 
-        const diffs: {
-            filepath: string;
-            status: 'added' | 'deleted' | 'modified';
-            old_oid: string | undefined;
-            new_oid: string | undefined;
-        }[] = await walk({
-            fs: fs,
-            dir: RELATIVE_INSTANCE_DIRECTORY,
-            trees: [TREE({ ref: base_commit_sha }), TREE({ ref: target_commit_sha })],
-            map: async (filepath, [a, b]) => {
-                if (filepath === '.') return;
-
-                const type = await (a ?? b)?.type();
-                if (type === 'tree') return;
-
-                const a_oid = await a?.oid();
-                const b_oid = await b?.oid();
-
-                if (a_oid === b_oid) return;
-
-                return {
-                    filepath,
-                    status: !a ? 'added' : !b ? 'deleted' : 'modified',
-                    old_oid: a_oid,
-                    new_oid: b_oid,
-                };
-            },
-        });
+        const diffs: git_tree_diff_entry[] =
+            (await git_diff_tree(RELATIVE_INSTANCE_DIRECTORY, base_commit_sha, target_commit_sha)) ??
+            (await diff_trees_with_isomorphic_git(base_commit_sha, target_commit_sha));
 
         // Filter by filepaths
         const filtered_diffs = await filter_and_plan_files(

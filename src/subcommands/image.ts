@@ -2,7 +2,7 @@ import path from 'node:path';
 import { mkdir, rm } from 'node:fs/promises';
 import { ANNOTATED_FILE, MOD_BASE_DIR, PACKAGING, RELATIVE_INSTANCE_DIRECTORY } from '../utils/config';
 import { read_saved_mods, type SourceType } from '../utils/mods';
-import { is_git_available } from './package';
+import { is_git_available } from '../utils/git';
 import { path_is_directory } from '../utils/fs';
 import { run_pool } from '../utils/utils';
 
