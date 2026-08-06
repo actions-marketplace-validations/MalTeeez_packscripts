@@ -1,5 +1,22 @@
-import { ANNOTATED_FILE, DOWNLOAD_TEMP_DIR, DOWNLOAD_UNDO_DIR, GITHUB_API_KEY, MOD_BASE_DIR } from '../utils/config';
-import { assert_gh_key, download_file, filter_assets, print_gh_ratelimits, query_gh_project_by_url, SOURCE_API_KEYS } from '../utils/fetch';
+import {
+    ANNOTATED_FILE,
+    DOWNLOAD_TEMP_DIR,
+    DOWNLOAD_UNDO_DIR,
+    GITHUB_API_KEY,
+    MOD_BASE_DIR,
+    PACKAGING,
+    RELATIVE_INSTANCE_DIRECTORY,
+} from '../utils/config';
+import {
+    assert_gh_key,
+    download_file,
+    filter_assets,
+    gh_request,
+    print_gh_ratelimits,
+    query_gh_project_by_owner_project,
+    query_gh_project_by_url,
+    SOURCE_API_KEYS,
+} from '../utils/fetch';
 import {
     collect_files_from_zip,
     extract_file_from_zip,
@@ -10,12 +27,45 @@ import {
     save_list_to_file,
     save_map_to_file,
 } from '../utils/fs';
-import { are_all_mods_unlocked, default_mod_object, is_mod_ignored_by_name, parse_mod_details, read_saved_mods, type mod_object } from '../utils/mods';
-import { CLIColor, clone, finish_live_zone, hash_buffer, init_live_zone, is_finished, live_log, render_md, rev_replace_all, update_live_zone } from '../utils/utils';
+import {
+    are_all_mods_unlocked,
+    default_mod_object,
+    is_mod_ignored_by_name,
+    parse_mod_details,
+    read_saved_mods,
+    type mod_object,
+    type SourceType,
+} from '../utils/mods';
+import {
+    CLIColor,
+    clone,
+    finish_live_zone,
+    hash_buffer,
+    init_live_zone,
+    is_finished,
+    live_log,
+    render_md,
+    rev_replace_all,
+    run_pool,
+    update_live_zone,
+} from '../utils/utils';
 import { mkdir, rename, rm } from 'node:fs/promises';
 import { toNamespacedPath } from 'node:path';
-import { extract_required_prs, parse_gh_url } from '../utils/sources';
+import { parse_gh_url } from '../utils/sources';
 import { get_dl_url_from_github_url, type Artifact } from './pr';
+import {
+    log_debug,
+    log_err,
+    log_info,
+    log_ok,
+    log_step,
+    log_warn,
+    tag_bracket,
+    tag_count,
+    tag_dim,
+    tag_neutral,
+    tag_primary,
+} from '../utils/log';
 
 interface ReleaseAsset {
     url: string;
@@ -70,7 +120,9 @@ function render_wide_release(
     const age_days = age_days_raw.toFixed(2);
     const padding = rev_replace_all(' '.repeat(options.version_padding - release.tag_name.length), '   ', ' . ');
     const release_name =
-        release.name && release.name !== release.tag_name ? ` ${CLIColor.FgGray}·${CLIColor.Reset} ${CLIColor.FgWhite2}${release.name}${CLIColor.Reset}` : '';
+        release.name && release.name !== release.tag_name
+            ? ` ${CLIColor.FgGray}·${CLIColor.Reset} ${CLIColor.FgWhite2}${release.name}${CLIColor.Reset}`
+            : '';
     const badges =
         (release.draft ? ` ${CLIColor.BgYellow0}${CLIColor.FgBlack}${CLIColor.Bright} DRAFT ${CLIColor.Reset}` : '') +
         (release.prerelease ? ` ${CLIColor.BgMagenta0}${CLIColor.FgWhite}${CLIColor.Bright} PRE ${CLIColor.Reset}` : '');
@@ -312,7 +364,9 @@ export async function switch_version_of_mod(
                     mod.update_state.version = version;
                     mod.update_state.last_updated_at = new Date(Date.now()).toISOString();
                     if (is_base_required) {
-                        console.info(`Mod required by basegame (${mod_id}) changed in version. Don't forget to also change it externally, if required.`);
+                        console.info(
+                            `Mod required by basegame (${mod_id}) changed in version. Don't forget to also change it externally, if required.`,
+                        );
                     }
                 })
                 .catch(() => console.warn(`W: Failed to move switched jar ${file_name} for mod ${mod_id} into the mod directory.`));
@@ -361,7 +415,9 @@ export async function restore_to_asset_versions(
             continue;
         }
 
-        let { headers, status, body } = await query_gh_project_by_url(mod.source, '/releases/tags/' + mod.update_state.version, undefined, [404]);
+        let { headers, status, body } = await query_gh_project_by_url(mod.source, '/releases/tags/' + mod.update_state.version, undefined, [
+            404,
+        ]);
         if (status === '200' && body != undefined && body.assets != undefined && Array.isArray(body.assets)) {
             let assets = body.assets as Array<{ browser_download_url: string; name: string; size: any }>;
             let [file_name, dl_url, size] = filter_assets(assets, mod.update_state.file_pattern);
@@ -428,7 +484,10 @@ export async function restore_to_asset_versions(
         let running_downloads = 0;
         let completed_downloads = 0;
         const full_dls = to_update_mods.length;
-        const download_map: Map<string, { response: Promise<string>; start_time: number; file_name: string; is_base_required: boolean; mod_obj: mod_object }> = new Map();
+        const download_map: Map<
+            string,
+            { response: Promise<string>; start_time: number; file_name: string; is_base_required: boolean; mod_obj: mod_object }
+        > = new Map();
         const downloaded_mods: Map<string, { file_name: string; is_base_required: boolean; mod_obj: mod_object }> = new Map();
         console.log(`\nRedownloading ${full_dls} mods...`);
 
@@ -531,7 +590,9 @@ export async function restore_to_asset_versions(
                     await rename(`${DOWNLOAD_TEMP_DIR}/${file_name}`, new_mod_path)
                         .then(async () => {
                             if (!(await Bun.file(new_mod_path).exists())) {
-                                console.warn(`W: Failed to move newer file for ${mod_id} (${file_name}) to mod directory. Reverting to previous version.`);
+                                console.warn(
+                                    `W: Failed to move newer file for ${mod_id} (${file_name}) to mod directory. Reverting to previous version.`,
+                                );
                                 await rename(`${DOWNLOAD_UNDO_DIR}/${old_mod_jar}`, mod.file_path).catch((err) => {
                                     console.warn(`W: Failed to move the older jar for mod ${mod_id} back from the undo dir into the mod dir.`);
                                 });
@@ -548,7 +609,9 @@ export async function restore_to_asset_versions(
                                 mod.file_path = new_mod_path;
                                 mod.update_state.last_updated_at = new Date(Date.now()).toISOString();
                                 if (is_base_required) {
-                                    console.info(`Mod required by basegame (${mod_id}) was changed. Don't forget to also change it externally, if required.`);
+                                    console.info(
+                                        `Mod required by basegame (${mod_id}) was changed. Don't forget to also change it externally, if required.`,
+                                    );
                                 }
                             }
                         })
@@ -567,96 +630,243 @@ export async function restore_to_asset_versions(
     await print_gh_ratelimits(GITHUB_API_KEY);
 }
 
+async function fetch_gh_org_repos(org: string): Promise<{ name: string; html_url: string; full_name: string }[]> {
+    const gh_api_key = SOURCE_API_KEYS.get('GITHUB');
+    if (gh_api_key == undefined) throw Error('Missing github API key.');
+    const repos: { name: string; html_url: string; full_name: string }[] = [];
+    let page = 1;
+    while (true) {
+        const res = await gh_request(`/orgs/${org}/repos?per_page=100&page=${page}`, gh_api_key);
+        if (!res.ok) break;
+        const body = (await res.json()) as { name: string; html_url: string; full_name: string }[];
+        if (!Array.isArray(body) || body.length === 0) break;
+        repos.push(...body);
+        if (body.length < 100) break;
+        page++;
+    }
+    return repos;
+}
+
 //#region refresh links
 export async function verify_and_refresh_source_links(
     options: {
         dry: boolean;
+        orgs?: string[];
     },
     mod_map?: Map<string, mod_object>,
 ) {
     assert_gh_key();
     mod_map = mod_map == undefined ? await read_saved_mods(ANNOTATED_FILE) : mod_map;
+    const available_repo_map: Map<string, string[]> = new Map();
+
+    // Try to find github repos for mods that dont have any source yet in the github orgs provided in --org
+    if (options.orgs && options.orgs.length > 0) {
+        // Fetch each org's full repo list once, then match against it as cache
+        const org_repo_lists = new Map<string, { name: string; html_url: string; full_name: string }[]>();
+        for (const org of options.orgs) {
+            log_step(`Fetching repo list for org ${tag_primary(org)}...`);
+            org_repo_lists.set(org, await fetch_gh_org_repos(org));
+        }
+
+        for (const [mod_name, mod] of mod_map) {
+            // Run only for mods that have an empty source & are on github or unknown
+            if (mod.source || !(mod.update_state.source_type === 'OTHER' || mod.update_state.source_type === 'GITHUB')) continue;
+
+            for (const org of options.orgs) {
+                const repos = org_repo_lists.get(org) ?? [];
+
+                const scored = repos
+                    .map((repo) => {
+                        const r = repo.name.toLowerCase().replace(/[-_]/g, '');
+                        const m = mod_name.toLowerCase().replace(/[-_]/g, '');
+                        const score = r === m ? 3 : r.includes(m) || m.includes(r) ? 1 : 0;
+                        return { repo, score };
+                    })
+                    .filter((x) => x.score > 0)
+                    .sort((a, b) => b.score - a.score);
+
+                if (scored.length === 0) continue;
+
+                log_info(
+                    `Tentatively found ${scored.length} repo(s) for mod without source ${tag_primary(mod_name)}, verifying against releases...`,
+                );
+                available_repo_map.set(
+                    mod_name,
+                    scored.map((entry) => entry.repo.html_url + '/releases/tag/pleasematchmeheart'),
+                );
+                break;
+            }
+        }
+    }
+
+    const tasks: (() => Promise<void>)[] = [];
+    let completed = 0;
+    let total = 0;
+
+    function render_progress() {
+        const progress = total > 0 ? Math.ceil(((completed / total) * 100) / 2) : 0;
+        update_live_zone([
+            `|${CLIColor.FgWhite}${'='.repeat(progress)}${CLIColor.FgGray}${'-'.repeat(50 - progress)}${CLIColor.Reset}|`,
+            `Verifying source links - ${CLIColor.FgWhite}${completed}${CLIColor.FgGray} of ${CLIColor.FgWhite}${total}${CLIColor.Reset}`,
+        ]);
+    }
 
     for (const [mod_name, mod] of mod_map) {
-        if (!mod.update_state || !mod.source) continue;
+        if (!mod.update_state || !mod.update_state.sha256_sum) continue;
 
         const source_api_key = SOURCE_API_KEYS.get(mod.update_state.source_type);
-        if (!source_api_key) {
+        if (!source_api_key && mod.update_state.source_type !== 'OTHER') {
             //console.warn('W: Missing API key for mods source ', mod.update_state.source_type, ', ignoring.');
             continue;
         }
 
-        switch (mod.update_state.source_type) {
-            case 'GITHUB': {
-                const url_match = parse_gh_url(mod.source);
-                if (url_match != undefined) {
-                    const { owner, project, primary, secondary, key } = url_match;
-                    // Does the version on the file match the version in the url
-                    if (primary === 'releases' && secondary === 'tag' && key != undefined && mod.update_state.version !== key) {
-                        // Has to be updated, fetch releases from github
-                        let release: Release | undefined = undefined;
-                        let { headers, status, body } = await query_gh_project_by_url(mod.source, '/releases?per_page=100');
-                        if (status == '200' && body != undefined && Array.isArray(body)) {
-                            const releases = Array.from(body);
-                            // Try to find in releases by matching mod version against release tag
-                            release = releases.find((entry: Release) => entry.tag_name === mod.update_state.version);
+        const extra_github_repos = available_repo_map.get(mod_name);
+        const available_repos = extra_github_repos ?? [mod.source];
+        if (available_repos == undefined || available_repos.length === 0) continue;
 
-                            if (release == undefined && headers?.get('link')?.includes('rel="last"')) {
-                                let page = 2;
-                                while (release == undefined && page < 10 && headers?.get('link')?.includes('rel="last"')) {
-                                    ({ headers, status, body } = await query_gh_project_by_url(mod.source, '/releases?per_page=100&page=' + page));
-                                    if (status == '200' && body != undefined && Array.isArray(body)) {
-                                        // Find release from matched tag or matched asset digest
-                                        release = body.find(
-                                            (entry: Release) =>
-                                                entry.tag_name === mod.update_state.version ||
-                                                entry.assets.find(
-                                                    (asset_entry) => asset_entry.digest != null && asset_entry.digest.slice(7) === mod.update_state.sha256_sum,
-                                                ) != undefined,
-                                        );
-                                        page++;
-                                    } else {
-                                        console.warn('W: Failed to fetch further releases for page ', page, '.');
-                                        break;
+        tasks.push(async () => {
+            try {
+                const digest = mod.update_state.sha256_sum;
+                const asset_matches_digest = (asset: ReleaseAsset) => asset.digest != null && asset.digest.slice(7) === digest;
+
+                // Try a single tag fetch against owner/project. Returns true if a matching asset was found.
+                async function try_tag(url_match: { owner: string; project: string }, tag: string): Promise<boolean> {
+                    const { status, body } = await query_gh_project_by_owner_project(
+                        url_match,
+                        '/releases/tags/' + tag,
+                        undefined,
+                        [404],
+                    );
+                    if (status !== '200' || body == undefined || !Array.isArray(body.assets)) return false;
+                    const release = body as unknown as Release;
+                    const asset = release.assets.find(asset_matches_digest);
+                    if (asset == undefined) return false;
+                    mod.source = asset.browser_download_url;
+                    mod.update_state.version = release.tag_name;
+                    return true;
+                }
+
+                for (const available_repo of available_repos) {
+                    const mod_source: string | undefined = extra_github_repos != undefined ? available_repo : mod.source;
+                    const mod_source_type: SourceType = extra_github_repos != undefined ? 'GITHUB' : mod.update_state.source_type;
+
+                    if (!mod_source) continue;
+
+                    switch (mod_source_type) {
+                        case 'GITHUB': {
+                            const url_match = parse_gh_url(mod_source);
+                            if (url_match == undefined) {
+                                live_log(`W: Encountered malformed source URL for mod ${mod_name}, skipping. (${mod_source})`, console.warn);
+                                continue;
+                            }
+
+                            const { owner, project } = url_match;
+
+                            // Step A: if the source URL is a direct asset link, trust its tag first.
+                            // Refresh collapses URLs to owner/project so this only applies before refresh,
+                            // or when update_state.version has drifted from the URL's tag.
+                            const url_tag =
+                                url_match.primary === 'releases' && url_match.secondary === 'download' ? url_match.key : undefined;
+                            if (url_tag != undefined && (await try_tag(url_match, url_tag))) {
+                                live_log(
+                                    `Found mod source ${mod_name} at github repo ${owner}/${project} via URL tag, using as future source.`,
+                                );
+                                break;
+                            }
+
+                            // Step B: fall back to update_state.version (steady-state path after refresh).
+                            const state_version = mod.update_state.version;
+                            if (state_version && state_version !== url_tag && (await try_tag(url_match, state_version))) {
+                                live_log(
+                                    `Found mod source ${mod_name} at github repo ${owner}/${project} via tracked version, using as future source.`,
+                                );
+                                if (extra_github_repos != undefined) {
+                                    mod.update_state.source_type = 'GITHUB';
+                                }
+                                break;
+                            }
+
+                            // Step C: full paginated walk through all releases.
+                            let release: Release | undefined = undefined;
+                            let { headers, status, body } = await query_gh_project_by_owner_project(
+                                url_match,
+                                '/releases?per_page=100',
+                            );
+                            if (status == '200' && body != undefined && Array.isArray(body)) {
+                                release = body.find((entry: Release) => entry.assets.find(asset_matches_digest) != undefined);
+
+                                if (release == undefined && headers?.get('link')?.includes('rel="last"')) {
+                                    let page = 2;
+                                    while (release == undefined && page < 10 && headers?.get('link')?.includes('rel="last"')) {
+                                        ({ headers, status, body } = await query_gh_project_by_url(
+                                            mod_source,
+                                            '/releases?per_page=100&page=' + page,
+                                        ));
+                                        if (status == '200' && body != undefined && Array.isArray(body)) {
+                                            release = body.find(
+                                                (entry: Release) => entry.assets.find(asset_matches_digest) != undefined,
+                                            );
+                                            page++;
+                                        } else {
+                                            live_log('W: Failed to fetch further releases for page ' + page, console.warn);
+                                            break;
+                                        }
                                     }
                                 }
                             }
-                        }
 
-                        if (release != undefined) {
-                            const asset = release.assets.find((entry) => entry.digest != null && entry.digest.slice(7) === mod.update_state.sha256_sum);
-                            if (asset != undefined) {
-                                mod.source = asset.browser_download_url;
-                            } else {
-                                console.log(`Found matching release for mod ${mod_name}, but failed to find matching asset.`);
+                            if (release != undefined) {
+                                const asset = release.assets.find(asset_matches_digest);
+                                if (asset != undefined) {
+                                    mod.source = asset.browser_download_url;
+                                    mod.update_state.version = release.tag_name;
+                                    if (extra_github_repos != undefined) {
+                                        mod.update_state.source_type = 'GITHUB';
+                                    }
+                                    live_log(
+                                        `Found mod source ${mod_name} at github repo ${owner}/${project} via release scan, using as future source.`,
+                                    );
+                                    break;
+                                } else {
+                                    live_log(
+                                        `W: Found matching release for mod ${mod_name}, but failed to find matching asset.`,
+                                        console.warn,
+                                    );
+                                }
                             }
-                        } else {
-                            console.log(`Failed to find release tag ${mod.update_state.version} for mod ${mod_name}.`);
+
+                            break;
+                        }
+                        case 'CURSEFORGE': {
+                            // TBD
+                            break;
+                        }
+                        case 'MODRINTH': {
+                            // TBD
+                            break;
+                        }
+                        case 'OTHER': {
+                            // IDK
+                            break;
+                        }
+                        default: {
+                            live_log(`W: Encountered unkown source type '${mod.update_state.source_type}', skipping`, console.warn);
                         }
                     }
-                } else {
-                    console.warn('W: Encountered malformed source URL for mod ', mod_name, ', skipping.', mod.source);
-                    continue;
                 }
+            } finally {
+                completed++;
+                render_progress();
+            }
+        });
+    }
 
-                break;
-            }
-            case 'CURSEFORGE': {
-                // TBD
-                break;
-            }
-            case 'MODRINTH': {
-                // TBD
-                break;
-            }
-            case 'OTHER': {
-                // IDK
-                break;
-            }
-            default: {
-                console.warn(`W: Encountered unkown source type '${mod.update_state.source_type}', skipping`);
-            }
-        }
+    total = tasks.length;
+    if (total > 0) {
+        init_live_zone(2);
+        render_progress();
+        await run_pool(tasks, 8);
+        finish_live_zone();
     }
 
     if (!options.dry) {
@@ -669,37 +879,37 @@ export async function verify_and_refresh_source_links(
 //#region switch indev
 export async function switch_to_indev_version(
     source_url: string | undefined,
-    options: { dry: boolean; build_job?: string; artifact_name?: string; allow_failed_workflows?: boolean },
+    options: { dry: boolean; build_job?: string; artifact_name?: string; allow_failed_workflows?: boolean; pack_variant_name?: string },
     mod_map?: Map<string, mod_object>,
 ) {
     // Initial assertions
     if (source_url == undefined) {
-        console.error(`${CLIColor.FgRed10}ERR:${CLIColor.Reset} Missing source url.`);
+        log_err('Missing source url.');
         return;
     }
     assert_gh_key();
     mod_map = mod_map ?? (await read_saved_mods(ANNOTATED_FILE));
-    
+
     const url_match = parse_gh_url(source_url);
-    const artifact = await get_dl_url_from_github_url(source_url, options.build_job, options.artifact_name, 10, options.allow_failed_workflows ?? false);
+    const artifact = await get_dl_url_from_github_url(
+        source_url,
+        options.build_job,
+        options.artifact_name,
+        10,
+        options.allow_failed_workflows ?? false,
+    );
     if (artifact == undefined || url_match == undefined || url_match.primary == undefined) {
-        console.error(
-            `${CLIColor.FgRed10}ERR:${CLIColor.Reset} Failed to find a download url from source url ${CLIColor.FgGray}'${CLIColor.FgGray18}${source_url}${CLIColor.FgGray}'${CLIColor.Reset}.`,
-        );
+        log_err(`Failed to find a download url from source url ${tag_bracket(source_url)}.`);
         throw Error();
     } else {
-        console.info(
-            `Using artifact ${CLIColor.BgBlue0}${CLIColor.FgWhite1}${CLIColor.Bright} ${artifact.name} ${CLIColor.Reset} ` +
-                `${CLIColor.FgGray}(${CLIColor.FgGray18}${(artifact.size_in_bytes / 1024).toFixed(0)} ${CLIColor.FgGray14}KB${CLIColor.FgGray}, ` +
-                `${CLIColor.FgGray18}${artifact.digest.slice(0, 12)}…${CLIColor.FgGray})${CLIColor.Reset}`,
+        log_info(
+            `Using artifact ${tag_primary(artifact.name)} ${tag_bracket(`${(artifact.size_in_bytes / 1024).toFixed(0)} KB, ${artifact.digest.slice(0, 12)}…`)}`,
         );
     }
 
     let { owner, project, primary, secondary, key, asset, fifth } = url_match;
     const pr_id = `${owner}/${project}/${primary}/${secondary}`;
-    console.info(
-        `${CLIColor.FgGray}-${CLIColor.Reset} Applying Artifact from ${CLIColor.BgBlue0}${CLIColor.FgWhite1}${CLIColor.Bright} ${pr_id} ${CLIColor.Reset}${CLIColor.FgGray}...${CLIColor.Reset}`,
-    );
+    log_step(`Applying Artifact from ${tag_primary(pr_id)}...`);
 
     if (options.dry) return;
 
@@ -708,74 +918,126 @@ export async function switch_to_indev_version(
 
 export async function apply_github_artifact(
     artifact: Artifact,
-    options: { dry: boolean; },
+    options: { dry: boolean; pack_variant_name?: string },
     mod_map: Map<string, mod_object>,
 ) {
     if (options.dry) return;
 
     const temp_dir = DOWNLOAD_TEMP_DIR.replace(/\/$/m, '') + '/indev';
     if (path_is_directory(temp_dir)) {
-        console.info(`Old temp dir at ${CLIColor.FgGray}(${CLIColor.FgGray18}${temp_dir}${CLIColor.FgGray})${CLIColor.Reset} exists, recreating..`);
+        log_info(`Old temp dir at ${tag_bracket(temp_dir)} exists, recreating..`);
         await rm(temp_dir, { recursive: true });
     }
 
     await mkdir(temp_dir, { recursive: true });
 
-    // Actually download the artifact, should always be a zip
-    console.info(`${CLIColor.FgGray}-${CLIColor.Reset} Downloading artifact${CLIColor.FgGray}...${CLIColor.Reset}`);
-    await download_file(artifact.archive_download_url, 'GITHUB', temp_dir, artifact.name + '.zip', SOURCE_API_KEYS.get('GITHUB'));
-    const zip_file_name = temp_dir + '/' + artifact.name + '.zip';
+    // Actually download the artifact, should always be a zip or a jar (also a zip :KEKW:)
+    log_step('Downloading artifact...');
+    const is_zip = !artifact.name.endsWith('.jar');
+    await download_file(
+        artifact.archive_download_url,
+        'GITHUB',
+        temp_dir,
+        artifact.name + (is_zip ? '.zip' : ''),
+        SOURCE_API_KEYS.get('GITHUB'),
+    );
+    const zip_file_name = temp_dir + '/' + artifact.name + (is_zip ? '.zip' : '');
     const file = Bun.file(zip_file_name);
 
     // Check integrity of file
     if (!(await file.exists())) {
-        console.error(`${CLIColor.FgRed10}ERR:${CLIColor.Reset} Failed to download file, is on disk missing.`, file);
+        log_err(`Failed to download file, is on disk missing: ${zip_file_name}`);
         return;
     } else if (file.size != artifact.size_in_bytes) {
-        console.error(
-            `${CLIColor.FgRed10}ERR:${CLIColor.Reset} Size of downloaded file differs, got ` +
-                `${CLIColor.Bright}${file.size}${CLIColor.Reset} against expected ${CLIColor.Bright}${artifact.size_in_bytes}${CLIColor.Reset}.`,
-        );
+        log_err(`Size of downloaded file differs, got ${tag_count(file.size)} against expected ${tag_count(artifact.size_in_bytes)}.`);
         return;
     } else if ((await hash_buffer(await file.bytes(), 'sha256')) !== artifact.digest) {
-        console.error(
-            `${CLIColor.FgRed10}ERR:${CLIColor.Reset} Checksum of file differs, got ` +
-                `${CLIColor.Bright}${await hash_buffer(await file.bytes(), 'sha256')}${CLIColor.Reset} against expected ${CLIColor.Bright}${artifact.digest}${CLIColor.Reset}.`,
+        log_err(
+            `Checksum of file differs, got ${tag_dim(await hash_buffer(await file.bytes(), 'sha256'))} against expected ${tag_dim(artifact.digest)}.`,
         );
         return;
     } else if (!(await is_zip_file(file))) {
-        console.error(`${CLIColor.FgRed10}ERR:${CLIColor.Reset} Downloaded file matches expected but is not a zip file. We can only handle zip files for now.`);
+        log_err('Downloaded file matches expected but is not a zip / jar file. We can only handle zip / jar files for now.');
         return;
     } else {
-        console.info(`${CLIColor.FgGreen11}✔${CLIColor.Reset} Downloaded file!`);
+        log_step(`Downloaded artifact ${is_zip ? 'zip' : 'jar'} ${tag_primary(artifact.name + (is_zip ? 'zip' : ''))}`);
     }
 
-    // Find .jar file in zip we want and extract it
-    const jar_files = (await collect_files_from_zip(zip_file_name, /\.jar$/m)) ?? [];
-    const filtered_jar_files = jar_files.filter((file_in_zip) => !is_mod_ignored_by_name(file_in_zip.replace(/(?:.*?)([^\/]+?$)/, '$1')));
+    let jar_file = artifact.name;
+    let jar_file_path = zip_file_name;
+    if (is_zip) {
+        // Find .jar file in zip we want and extract it
+        const jar_files = (await collect_files_from_zip(zip_file_name, /\.jar$/m)) ?? [];
+        const filtered_jar_files = jar_files.filter((file_in_zip) => !is_mod_ignored_by_name(file_in_zip.replace(/(?:.*?)([^\/]+?$)/, '$1')));
 
-    if (filtered_jar_files.length > 1) {
-        console.error(`${CLIColor.FgRed10}ERR:${CLIColor.Reset} Zip contains more than one file after filtering. Remaining:`, filtered_jar_files);
-        return;
-    } else if (filtered_jar_files.length < 1) {
-        console.error(`${CLIColor.FgRed10}ERR:${CLIColor.Reset} Zip contains no .jar files that we want / expected.`);
-        return;
+        if (filtered_jar_files.length > 1) {
+            log_err(`Zip contains more than one file after filtering. Remaining: ${filtered_jar_files.join(', ')}`);
+            return;
+        } else if (filtered_jar_files.length < 1) {
+            log_err('Zip contains no .jar files that we want / expected.');
+            return;
+        }
+
+        jar_file = (filtered_jar_files[0] as string).replace(/(?:.*?)([^\/]+?$)/, '$1');
+        jar_file_path = temp_dir + '/' + jar_file;
+        await Bun.write(jar_file_path, await extract_file_from_zip(zip_file_name, filtered_jar_files[0] as string));
+        log_step(`Extracted mod jar from zip to ${tag_bracket(jar_file_path)}`);
     }
-
-    const jar_file = (filtered_jar_files[0] as string).replace(/(?:.*?)([^\/]+?$)/, '$1');
-    const jar_file_path = temp_dir + '/' + jar_file;
-    await Bun.write(jar_file_path, await extract_file_from_zip(zip_file_name, filtered_jar_files[0] as string));
-    console.info(
-        `${CLIColor.FgGray}-${CLIColor.Reset} Extracted mod jar from zip to ${CLIColor.FgGray}(${CLIColor.FgGray18}${jar_file_path}${CLIColor.FgGray})${CLIColor.Reset}`,
-    );
 
     // Check modid of jar for switching out with existing version
-    const { id: mod_id, version: mod_version, wants: mod_wants, hash: mod_hash, other_mod_ids: mod_other_ids } = await parse_mod_details(jar_file_path);
-    let jar_mod_path = MOD_BASE_DIR + '/' + jar_file;
+    const {
+        id: mod_id,
+        version: mod_version,
+        wants: mod_wants,
+        hash: mod_hash,
+        other_mod_ids: mod_other_ids,
+    } = await parse_mod_details(jar_file_path);
+
+    // Rewrite target path based on package variant if we were given one
+    let mod_dir = MOD_BASE_DIR;
+    if (options.pack_variant_name != undefined) {
+        if (PACKAGING == undefined) {
+            throw Error('Packaging config not yet initialized, but we were given a target pack variant.');
+        }
+        const pack_variant = PACKAGING.PACK_VARIANTS[options.pack_variant_name];
+        if (pack_variant == undefined) {
+            throw Error(`Failed to find pack variant named '${options.pack_variant_name}'. Have: [${Object.keys(PACKAGING.PACK_VARIANTS)}].`);
+        }
+
+        // Taken from filter_and_plan_files() in package.ts
+        const combined_filters: Array<{ filter_path: string; include_as: string | undefined }> = [
+            ...pack_variant.TRACK_INCLUDE_PATHS.map((include_filter) => {
+                return {
+                    filter_path: include_filter.path.replace(new RegExp(`^${RELATIVE_INSTANCE_DIRECTORY}`, 'm'), ''),
+                    include_as: include_filter.include_as,
+                };
+            }),
+            ...pack_variant.FORCE_INCLUDE_PATHS.map((include_filter) => {
+                return {
+                    filter_path: include_filter.path.replace(new RegExp(`^${RELATIVE_INSTANCE_DIRECTORY}`, 'm'), ''),
+                    include_as: include_filter.include_as,
+                };
+            }),
+        ];
+        const stripped_mod_dir = MOD_BASE_DIR.replace(new RegExp(`^${RELATIVE_INSTANCE_DIRECTORY}`, 'm'), '');
+        for (const filter of combined_filters) {
+            if (filter.filter_path === '') continue;
+            if (stripped_mod_dir.startsWith(filter.filter_path)) {
+                mod_dir =
+                    RELATIVE_INSTANCE_DIRECTORY +
+                    (filter.include_as != undefined
+                        ? stripped_mod_dir.replace(new RegExp(`^${filter.filter_path}`, 'm'), filter.include_as)
+                        : stripped_mod_dir);
+                break;
+            }
+        }
+    }
+
+    let jar_mod_path = mod_dir + '/' + jar_file;
 
     // Jar could not be recognized as a mod, add it as something unknown
     if (mod_id == undefined) {
-        console.warn(`${CLIColor.FgYellow1}WARN:${CLIColor.Reset} Failed to get an id from mod jar, directly moving to mod folder and exiting.`);
+        log_warn('Failed to get an id from mod jar, directly moving to mod folder and exiting.');
         await rename_file(jar_file_path, jar_mod_path);
         return;
     }
@@ -784,38 +1046,37 @@ export async function apply_github_artifact(
 
     // Jar was recognized as a mod, update / add it via our tracked mods
     if (mod_obj != undefined) {
-        console.info(
-            `Mod ${CLIColor.BgBlue0}${CLIColor.FgWhite1}${CLIColor.Bright} ${mod_id} ${CLIColor.Reset} is a tracked mod, currently under ` +
-                `${CLIColor.FgGray}(${CLIColor.FgGray18}${mod_obj.file_path}${CLIColor.FgGray})${CLIColor.Reset} ` +
-                `with version ${CLIColor.BgTeal3}${CLIColor.FgWhite1}${CLIColor.Bright} ${mod_obj.update_state.version} ${CLIColor.Reset}.`,
+        const mod_file_path = mod_obj.file_path.replace(MOD_BASE_DIR, mod_dir);
+        log_debug(
+            `Mod ${tag_primary(mod_id)} is a tracked mod, currently under ` +
+                `${tag_bracket(mod_file_path)} ` +
+                `with version ${tag_neutral(mod_obj.update_state.version ?? 'UNKNOWN')}.`,
         );
-        const old_jar = Bun.file(mod_obj.file_path);
+        const old_jar = Bun.file(mod_file_path);
         if (await old_jar.exists()) {
             await old_jar.delete();
         } else {
-            console.warn(`${CLIColor.FgYellow1}WARN:${CLIColor.Reset} Old jar is missing, skipping deletion.`);
+            log_warn('Old jar is missing, skipping deletion.');
         }
 
         // If mod was previously disabled, also disable it here
         if (!mod_obj.enabled) {
             jar_mod_path += '.disabled';
-            console.warn(`${CLIColor.FgYellow1}WARN:${CLIColor.Reset} Mod was previously disabled, also disabling it now.`);
+            log_warn('Mod was previously disabled, also disabling it now.');
         }
 
         await rename_file(jar_file_path, jar_mod_path);
-        console.info(`${CLIColor.FgGray}-${CLIColor.Reset} Moved indev jar to mods folder, updating track entry${CLIColor.FgGray}...${CLIColor.Reset}`);
+        log_step('Moved indev jar to mods folder, updating track entry...');
 
         mod_obj.file_path = jar_mod_path;
         mod_obj.update_state.version = mod_version ?? mod_obj.version + '-dirty';
         mod_obj.source = artifact.archive_download_url;
         mod_obj.update_state.last_updated_at = new Date(Date.now()).toISOString();
     } else {
-        console.info(
-            `Mod ${CLIColor.BgBlue0}${CLIColor.FgWhite1}${CLIColor.Bright} ${mod_id} ${CLIColor.Reset} is not a tracked mod, but we were able to recognize it as one.`,
-        );
+        log_info(`Mod ${tag_primary(mod_id)} is not yet tracked, adding to map.`);
 
         await rename_file(jar_file_path, jar_mod_path);
-        console.info(`${CLIColor.FgGray}-${CLIColor.Reset} Moved indev jar to mods folder, adding track entry${CLIColor.FgGray}...${CLIColor.Reset}`);
+        log_step('Moved indev jar to mods folder, adding track entry...');
 
         const new_mod_obj = clone(default_mod_object) as mod_object;
         new_mod_obj.file_path = jar_mod_path;
@@ -831,9 +1092,9 @@ export async function apply_github_artifact(
     await save_map_to_file(ANNOTATED_FILE, mod_map);
 
     const final_version = mod_version ?? artifact.name + '-dirty';
-    console.info(
-        `${CLIColor.FgGreen11}✔${CLIColor.Reset} Finished updating mod ${CLIColor.BgBlue0}${CLIColor.FgWhite1}${CLIColor.Bright} ${mod_id} ${CLIColor.Reset} ` +
-            `to indev version ${CLIColor.BgBlue0}${CLIColor.FgWhite1}${CLIColor.Bright} ${final_version} ${CLIColor.Reset} ` +
-            `${CLIColor.FgGray}(${CLIColor.FgGray18}${jar_mod_path.replace(MOD_BASE_DIR + '/', '')}${CLIColor.FgGray})${CLIColor.Reset}.`,
+    log_ok(
+        `Finished updating mod ${tag_primary(mod_id)} ` +
+            `to indev version ${tag_neutral(final_version)} ` +
+            `${tag_bracket(jar_mod_path.replace(mod_dir + '/', ''))}.`,
     );
 }

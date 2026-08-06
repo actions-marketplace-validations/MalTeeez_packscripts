@@ -3,6 +3,8 @@ import { CLIColor } from './utils';
 // Module-level debug flag, flipped by main.ts when --debug is passed.
 let DEBUG_ENABLED = false;
 
+const NO_COLOR = process.env['NO_COLOR'] !== undefined;
+
 export function set_debug_enabled(v: boolean): void {
     DEBUG_ENABLED = v;
 }
@@ -36,7 +38,7 @@ export function log_step(msg: string, link?: string): void {
 
 // Green check, for finished-successfully lines.
 export function log_ok(msg: string, link?: string): void {
-    console.info(with_link(`${CLIColor.FgGreen11}✔${CLIColor.Reset} ${msg}`, link));
+    console.info(with_link(`${CLIColor.FgGreen11}✔${CLIColor.Reset}  ${msg}`, link));
 }
 
 // Yellow WARN prefix - non-fatal issues the user should know about.
@@ -61,17 +63,24 @@ export function log_debug(msg: string, link?: string): void {
 
 // Main subject highlight - PR ids, run ids, artifact names. Blue background.
 export function tag_primary(s: string | number): string {
-    return `${CLIColor.BgBlue0}${CLIColor.FgWhite1}${CLIColor.Bright} ${s} ${CLIColor.Reset}`;
+    if (NO_COLOR) return `${CLIColor.FgBlue9}${CLIColor.Bright}[${s}]${CLIColor.Reset}`;
+    return `${CLIColor.BgBlue9}${CLIColor.FgBlack} ${s} ${CLIColor.Reset}`;
 }
 
 // Secondary subject - filters, branch names, build job names. Teal background.
 export function tag_neutral(s: string | number): string {
-    return `${CLIColor.BgTeal3}${CLIColor.FgWhite1}${CLIColor.Bright} ${s} ${CLIColor.Reset}`;
+    if (NO_COLOR) return `${CLIColor.FgTeal6}${CLIColor.Bright}[${s}]${CLIColor.Reset}`;
+    return `${CLIColor.BgTeal6}${CLIColor.FgBlack} ${s} ${CLIColor.Reset}`;
 }
 
 // Parenthetical detail - hashes, sizes, paths inside (...). Gray foreground only.
 export function tag_dim(s: string | number): string {
     return `${CLIColor.FgGray18}${s}${CLIColor.Reset}`;
+}
+
+// Attachment detail - files & paths. Provides brackets
+export function tag_bracket(s: string | number): string {
+    return `${CLIColor.FgGray}(${tag_dim(s)}${CLIColor.FgGray})${CLIColor.Reset}`
 }
 
 // Number-worth-emphasising - counts, sizes, "N of M".

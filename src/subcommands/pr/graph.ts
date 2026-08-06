@@ -6,7 +6,7 @@ import { extract_required_prs } from '../../utils/sources';
 import { log_debug, log_info, log_step, log_warn, tag_count, tag_dim, tag_neutral, tag_primary } from '../../utils/log';
 import { apply_github_artifact } from '../version';
 import { preflight_same_repo_dep, type PreflightResult } from './preflight';
-import { resolve_artifact_for_url, type Artifact, type ResolveFailureReason } from './resolve';
+import { resolve_artifact_for_url, verify_uncertain_refs, type Artifact, type ResolveFailureReason } from './resolve';
 
 //#region Types
 
@@ -17,6 +17,7 @@ export interface PRMeta {
     pr_id: string;          // 'owner/project#N'
     pr_url: string;
     merged: boolean;
+    closed: boolean;
     merged_at?: string;
     merge_commit_sha?: string;
     head: { ref: string; sha: string };
@@ -24,7 +25,7 @@ export interface PRMeta {
     body: string;
 }
 
-export type PRStateKind = 'open' | 'merged_with_release' | 'merged_unreleased' | 'merged_tag_unpublished';
+export type PRStateKind = 'open' | 'closed_unmerged' | 'merged_with_release' | 'merged_unreleased' | 'merged_tag_unpublished';
 
 export interface DepNode {
     id: string;                     // 'owner/project#N' for PR nodes, 'owner/project@sha' for default-commit nodes
@@ -65,22 +66,24 @@ export function new_gh_cache(): GhCache {
     };
 }
 
-export interface PreflightFailureRecord { initial_pr_id: string; dep_url: string; result: PreflightResult; }
-export interface ResolveFailureRecord   { node_id: string; reason: ResolveFailureReason | 'daily_baseline_unknown'; detail: string; link?: string; }
-export interface OwnerRejectionRecord   { from_pr_id: string; dep_owner: string; dep_url: string; }
+export interface PreflightFailureRecord  { initial_pr_id: string; dep_url: string; result: PreflightResult; }
+export interface PreflightAbsorbedRecord { initial_pr_id: string; dep_url: string; result: PreflightResult; }
+export interface ResolveFailureRecord    { node_id: string; reason: ResolveFailureReason | 'daily_baseline_unknown'; detail: string; link?: string; }
+export interface OwnerRejectionRecord    { from_pr_id: string; dep_owner: string; dep_url: string; }
 
 export interface DepGraph {
     root_id?: string;
     nodes: Map<string, DepNode>;
     apply_order: string[];
+    preflight_absorbed: PreflightAbsorbedRecord[];
     preflight_failures: PreflightFailureRecord[];
     resolve_failures:   ResolveFailureRecord[];
     owner_rejections:   OwnerRejectionRecord[];
 }
 
 export interface BuildOpts {
-    build_job?: string;
-    artifact_name?: string;
+    build_jobs?: string[];
+    artifact_name?: string[];
     allow_failed_workflows?: boolean;
     allow_external_owners?: boolean;
     other_allowed_owners?: string[];
@@ -92,7 +95,7 @@ export interface BuildOpts {
 //#region PR metadata fetch + classify
 
 // Fetch and cache the PR object for a given URL, returning a normalized PRMeta.
-async function fetch_pr_meta(pr_url: string, cache: GhCache): Promise<PRMeta | undefined> {
+export async function fetch_pr_meta(pr_url: string, cache: GhCache): Promise<PRMeta | undefined> {
     const parsed = parse_gh_url(pr_url);
     if (!parsed || parsed.primary !== 'pull' || parsed.secondary == undefined) return undefined;
     const { owner, project } = parsed;
@@ -112,6 +115,7 @@ async function fetch_pr_meta(pr_url: string, cache: GhCache): Promise<PRMeta | u
         pr_id: cache_key,
         pr_url,
         merged: Boolean(body.merged),
+        closed: body.state === 'closed',
         merged_at: body.merged_at ?? undefined,
         merge_commit_sha: body.merge_commit_sha ?? undefined,
         head: { ref: body.head?.ref ?? '', sha: body.head?.sha ?? '' },
@@ -154,12 +158,13 @@ async function fetch_release_for_tag(repo_url: string, tag: string, cache: GhCac
 }
 
 /**
- * Classify the state of a PR: open, merged with published release, merged with tag-but-unpublished, or merged-unreleased.
+ * Classify the state of a PR: open, closed-without-merge, merged with published release, merged with tag-but-unpublished, or merged-unreleased.
  * 
  * Logic: 
  * 1. Fetch `/pulls/<n>` (cache by `owner/project#N`).
- * 2. If `merged === false` → `{ state: 'open' }`.
- * 3. If `merged === true`:
+ * 2. If `merged === false` and `body.state === 'closed'` → `{ state: 'closed_unmerged' }`.
+ * 3. If `merged === false` → `{ state: 'open' }`.
+ * 4. If `merged === true`:
  *    - Walk releases (`/releases?per_page=100`) looking for one whose resolved tag commit equals `merge_commit_sha` OR whose `target_commitish` resolves to a SHA equal to `merge_commit_sha`. Tag→commit resolution per `AGENTS.md → Tag → commit resolution`.
  *    - If found and `draft === false` → `{ state: 'merged_with_release', release_tag, release_html_url }`.
  *    - If found but `draft === true`, OR a git tag exists (`/git/refs/tags/<tag>`) for the version-string but no release entry → `{ state: 'merged_tag_unpublished', tag }`.
@@ -171,9 +176,20 @@ export async function classify_pr_state(
 ): Promise<{ pr: PRMeta; state: PRStateKind; release_tag?: string; release_html_url?: string } | undefined> {
     const pr = await fetch_pr_meta(pr_url, cache);
     if (pr == undefined) return undefined;
+    log_debug(`Classifying ${pr.pr_id}: merged=${pr.merged}${pr.merge_commit_sha ? `, merge_sha=${pr.merge_commit_sha.slice(0, 7)}` : ''}`);
 
-    if (!pr.merged) return { pr, state: 'open' };
-    if (pr.merge_commit_sha == undefined) return { pr, state: 'merged_unreleased' };
+    if (!pr.merged) {
+        if (pr.closed) {
+            log_debug(`${pr.pr_id} -> closed_unmerged`);
+            return { pr, state: 'closed_unmerged' };
+        }
+        log_debug(`${pr.pr_id} -> open`);
+        return { pr, state: 'open' };
+    }
+    if (pr.merge_commit_sha == undefined) {
+        log_debug(`${pr.pr_id} -> merged_unreleased (no merge_commit_sha)`);
+        return { pr, state: 'merged_unreleased' };
+    }
 
     // Search recent releases for one covering the merge commit.
     const repo_key = `${pr.owner}/${pr.project}`;
@@ -192,14 +208,17 @@ export async function classify_pr_state(
         const sha = await resolve_tag_to_sha(pr_url, tag_name, cache);
         if (sha === pr.merge_commit_sha) {
             if (rel.draft === true) {
+                log_debug(`${pr.pr_id} -> merged_tag_unpublished (tag=${tag_name}, draft)`);
                 return { pr, state: 'merged_tag_unpublished', release_tag: tag_name, release_html_url: rel.html_url };
             }
+            log_debug(`${pr.pr_id} -> merged_with_release (tag=${tag_name})`);
             return { pr, state: 'merged_with_release', release_tag: tag_name, release_html_url: rel.html_url };
         }
     }
 
     // No release covers the merge commit. Last check: does a git tag exist somewhere referencing this commit
     // but with no release? That's tag_unpublished too. Cheap heuristic - skip this for now and report merged_unreleased.
+    log_debug(`${pr.pr_id} -> merged_unreleased (no release found across ${releases.length} release(s))`);
     return { pr, state: 'merged_unreleased' };
 }
 
@@ -260,9 +279,11 @@ export async function find_merged_prs_since_daily(
 
     // Find the daily baseline version - either from CI_INTEGRATION override or from mod_map.
     let baseline_version: string | undefined = CI_INTEGRATION?.SOURCE_OVERRIDES?.[repo_key]?.daily_version_override;
+    let baseline_mod: mod_object | undefined;
     if (baseline_version == undefined) {
         const repo_to_mods = build_repo_to_mods(mod_map);
         const mods = repo_to_mods.get(repo_key);
+        log_debug(`Repository ${repo_key} is upstream for mod ${mods}`)
         if (mods == undefined) {
             return {
                 ok: false,
@@ -273,7 +294,7 @@ export async function find_merged_prs_since_daily(
                     `For now this is a hard failure.`,
             };
         }
-        const baseline_mod = pick_baseline_mod(repo_key, mods);
+        baseline_mod = pick_baseline_mod(repo_key, mods);
         baseline_version = baseline_mod?.update_state.version;
     }
     if (baseline_version == undefined) {
@@ -281,7 +302,24 @@ export async function find_merged_prs_since_daily(
     }
 
     // Resolve tag -> commit -> date.
-    const baseline_sha = await resolve_tag_to_sha(repo_url, baseline_version, cache);
+    let baseline_sha = await resolve_tag_to_sha(repo_url, baseline_version, cache);
+    if (baseline_sha == undefined && baseline_mod?.update_state.sha256_sum) {
+        // Tag stored in mod_map not found on GitHub — fall back to digest scan of recent releases.
+        log_debug(`Tag '${baseline_version}' not found in ${repo_key}; falling back to digest scan of recent releases.`);
+        const scan_res = await query_gh_project_by_url(repo_url, `/releases?per_page=50`);
+        if (scan_res.status === '200' && Array.isArray(scan_res.body)) {
+            const sha_sum = baseline_mod.update_state.sha256_sum;
+            const matched_rel = (scan_res.body as any[]).find((rel) =>
+                Array.isArray(rel.assets) &&
+                rel.assets.some((a: any) => typeof a.digest === 'string' && a.digest.slice(7) === sha_sum),
+            );
+            if (matched_rel?.tag_name != undefined) {
+                log_debug(`Digest scan matched release tag '${matched_rel.tag_name}' for ${repo_key}; retrying tag resolution.`);
+                baseline_version = matched_rel.tag_name as string;
+                baseline_sha = await resolve_tag_to_sha(repo_url, baseline_version, cache);
+            }
+        }
+    }
     if (baseline_sha == undefined) {
         return { ok: false, reason: 'daily_baseline_unknown', detail: `Could not resolve tag '${baseline_version}' to a commit in ${repo_key}.` };
     }
@@ -309,6 +347,7 @@ export async function find_merged_prs_since_daily(
         }
     }
     const default_branch: string = CI_INTEGRATION?.SOURCE_OVERRIDES?.[repo_key]?.default_branch ?? (repo_meta?.default_branch as string | undefined) ?? 'main';
+    log_debug(`Baseline for ${repo_key}: version=${baseline_version}, sha=${baseline_sha.slice(0, 7)}, date=${baseline_date}, default_branch=${default_branch}`);
 
     // Paginate merged PRs into default since baseline_date.
     const merged_prs: Array<{ pr_number: number; merge_commit_sha: string; merged_at: string; html_url: string; body: string }> = [];
@@ -351,10 +390,12 @@ export async function find_merged_prs_since_daily(
 
 // DFS-build the dependency graph starting from root_pr_url.
 export async function build_dep_graph(root_pr_url: string, opts: BuildOpts, mod_map: Map<string, mod_object>, cache?: GhCache): Promise<DepGraph> {
+    log_debug(`build_dep_graph: root=${root_pr_url}, skip_artifact_download=${opts.skip_artifact_download ?? false}, build_jobs=${opts.build_jobs?.join(',') ?? '<none>'}`);
     cache = cache ?? new_gh_cache();
     const graph: DepGraph = {
         nodes: new Map(),
         apply_order: [],
+        preflight_absorbed: [],
         preflight_failures: [],
         resolve_failures: [],
         owner_rejections: [],
@@ -372,6 +413,7 @@ export async function build_dep_graph(root_pr_url: string, opts: BuildOpts, mod_
     traced.add(root_node.id);
 
     await expand_pr_node(root_node, graph, traced, opts, mod_map, cache);
+    log_debug(`DFS complete: ${graph.nodes.size} node(s) in graph.`);
 
     // Resolve artifacts unless caller said to skip (pr gate path).
     if (!opts.skip_artifact_download) {
@@ -383,6 +425,7 @@ export async function build_dep_graph(root_pr_url: string, opts: BuildOpts, mod_
     // Dedupe and topo sort.
     dedupe_graph_by_newest_commit(graph, cache);
     graph.apply_order = topo_postorder(graph);
+    log_debug(`Apply order (${graph.apply_order.length}): ${graph.apply_order.join(' -> ') || '<empty>'}`);
     return graph;
 }
 
@@ -417,15 +460,17 @@ async function expand_pr_node(node: DepNode, graph: DepGraph, traced: Set<string
     }
     const default_branch: string = CI_INTEGRATION?.SOURCE_OVERRIDES?.[repo_key]?.default_branch ?? (repo_meta?.default_branch as string | undefined) ?? 'main';
 
-    const required = extract_required_prs(initial.body);
+    const required = await verify_uncertain_refs(extract_required_prs(initial.body), node.owner, node.project);
+    log_debug(`Expanding ${node.id}: ${required.length} required PR match(es) in body, default_branch=${default_branch}`);
     for (const match of required) {
-        for (const dep_url of match.pr_urls) {
+        for (const dep_url of match.urls) {
             const dep_parsed = parse_gh_url(dep_url);
             if (!dep_parsed || dep_parsed.primary !== 'pull' || dep_parsed.secondary == undefined) {
                 log_warn(`Skipping unparseable required PR ref: ${dep_url}`);
                 continue;
             }
             const same_repo = dep_parsed.owner === initial.owner && dep_parsed.project === initial.project;
+            log_debug(`  ${dep_parsed.owner}/${dep_parsed.project}#${dep_parsed.secondary}: ${same_repo ? 'same-repo' : `cross-repo (owner=${dep_parsed.owner})`}`);
 
             if (same_repo) {
                 const dep_classify = await classify_pr_state(dep_url, cache);
@@ -436,6 +481,8 @@ async function expand_pr_node(node: DepNode, graph: DepGraph, traced: Set<string
                 const preflight_res = await preflight_same_repo_dep(initial, dep_classify.pr, default_branch, cache);
                 if (!preflight_res.ok) {
                     graph.preflight_failures.push({ initial_pr_id: initial.pr_id, dep_url, result: preflight_res });
+                } else {
+                    graph.preflight_absorbed.push({ initial_pr_id: initial.pr_id, dep_url, result: preflight_res });
                 }
                 // Pass or fail, same-repo deps NEVER enter the dep graph.
                 continue;
@@ -456,6 +503,7 @@ async function expand_pr_node(node: DepNode, graph: DepGraph, traced: Set<string
 
             const dep_id = `${dep_parsed.owner}/${dep_parsed.project}#${dep_parsed.secondary}`;
             if (traced.has(dep_id)) {
+                log_debug(`  ${dep_id} already traced; adding dep edge only`);
                 node.dependencies.push(dep_id);
                 continue;
             }
@@ -479,6 +527,7 @@ async function expand_pr_node(node: DepNode, graph: DepGraph, traced: Set<string
                 for (const mpr of since_daily.merged_prs) {
                     const mpr_id = `${dep_parsed.owner}/${dep_parsed.project}#${mpr.pr_number}`;
                     if (traced.has(mpr_id)) {
+                        log_debug(`  ${mpr_id} (merged-since-daily) already traced; adding dep edge only`);
                         node.dependencies.push(mpr_id);
                         continue;
                     }
@@ -513,7 +562,7 @@ async function resolve_node_artifact(node: DepNode, graph: DepGraph, opts: Build
     if (node.pr_meta == undefined) return;
 
     const resolve_res = await resolve_artifact_for_url(node.pr_meta.pr_url, {
-        build_job: opts.build_job,
+        build_jobs: opts.build_jobs,
         artifact_name: opts.artifact_name,
         allow_failed_workflows: opts.allow_failed_workflows,
         wait_timeout_ms: opts.wait_timeout_ms,
@@ -588,7 +637,7 @@ export function topo_postorder(graph: DepGraph): string[] {
 }
 
 // Apply artifacts in graph.apply_order using version.ts's apply_github_artifact.
-export async function apply_nodes_in_order(graph: DepGraph, options: { dry: boolean }, mod_map: Map<string, mod_object>): Promise<void> {
+export async function apply_nodes_in_order(graph: DepGraph, options: { dry: boolean; pack_variant_name?: string }, mod_map: Map<string, mod_object>): Promise<void> {
     for (const id of graph.apply_order) {
         const node = graph.nodes.get(id);
         if (node == undefined) continue;

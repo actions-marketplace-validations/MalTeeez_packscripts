@@ -3,7 +3,7 @@ import { parse_gh_url } from './sources';
 import type { JsonObject } from './utils';
 import { is_mod_ignored_by_name, type SourceType } from './mods';
 import { GITHUB_API_KEY } from './config';
-import { log_debug } from './log';
+import { log_debug, log_err, tag_count, tag_ok } from './log';
 
 export const SOURCE_API_KEYS: Map<SourceType, string> = new Map();
 
@@ -16,8 +16,18 @@ export function assert_gh_key() {
     }
 }
 
-export async function query_gh_project_by_url(
-    url: string,
+export async function query_gh_project_by_url(url: string, sub_repo_api_path: string, gh_api_key?: string, ignore_codes: number[] = []) {
+    const url_match = parse_gh_url(url);
+    if (url_match != undefined) {
+        return await query_gh_project_by_owner_project(url_match, sub_repo_api_path, gh_api_key, ignore_codes);
+    } else {
+        console.warn(`W: GitHub URL ${url} is faulty, can't check..`);
+    }
+    return { headers: undefined, body: undefined, status: '400' };
+}
+
+export async function query_gh_project_by_owner_project(
+    target_repo: { owner: string; project: string },
     sub_repo_api_path: string,
     gh_api_key?: string,
     ignore_codes: number[] = [],
@@ -29,26 +39,21 @@ export async function query_gh_project_by_url(
         }
     }
 
-    const url_match = parse_gh_url(url);
-    if (url_match != undefined) {
-        const { owner, project } = url_match;
-        const url = `/repos/${owner}/${project}/${sub_repo_api_path.replace(/^\//m, '')}`;
+    const { owner, project } = target_repo;
+    const api_path = sub_repo_api_path.replace(/^\//m, '');
+    const url = `/repos/${owner}/${project}${api_path.length > 0 ? '/' : ''}${api_path}`;
 
-        const res: Response | undefined = await gh_request(url, gh_api_key, 'GET');
-        if (res == undefined || !res.ok) {
-            if (res && !ignore_codes.includes(res.status)) {
-                console.warn(`W: Failed to get releases with ${res.status} | ${res.statusText} for ${project} (${url})`);
-                throw new Error();
-            }
-            return { headers: res.headers, body: undefined, status: String(res.status) };
-        } else {
-            if (res.headers.get('content-type')?.includes('application/json')) {
-                const body = (await res.json()) as JsonObject;
-                return { headers: res.headers, body, status: String(res.status) };
-            }
+    const res: Response | undefined = await gh_request(url, gh_api_key, 'GET');
+    if (res == undefined || !res.ok) {
+        if (res && !ignore_codes.includes(res.status)) {
+            console.warn(`W: Failed to get releases with ${res.status} | ${res.statusText} for ${project} (${url})`);
         }
+        return { headers: res.headers, body: undefined, status: String(res.status) };
     } else {
-        console.warn(`W: GitHub URL ${url} is faulty, can't check..`);
+        if (res.headers.get('content-type')?.includes('application/json')) {
+            const body = (await res.json()) as JsonObject;
+            return { headers: res.headers, body, status: String(res.status) };
+        }
     }
     return { headers: undefined, body: undefined, status: '400' };
 }
@@ -77,23 +82,25 @@ export function download_file(
                 `W: Failed to download file ${file_name} from ${source_type} with ${res.status} | ${res.statusText}. Headers: ${JSON.stringify(res.headers.toJSON())}`,
             );
         }
+        log_debug(`Started download for file ${tag_ok(file_name)} of size ${tag_count(content_length)}`, source);
         content_length = Number(content_length);
 
         const file = Bun.file(`${destination}/${file_name}`);
         const writer = file.writer({ highWaterMark: 1024 * 1024 });
 
         let written_bytes = 0;
-        for await (const chunk of res.body) {
-            // Await is actually needed here, since .write() returns a promise
-            written_bytes += await (writer.write(chunk) as unknown as Promise<number>).catch(() => {
-                reject(`W: Failed to write chunk of ${destination}/${file_name} to disk`);
-                return 0;
-            });
+        try {
+            for await (const chunk of res.body) {
+                written_bytes += await writer.write(chunk);
+            }
+        } catch {
+            await writer.end();
+            return reject(`W: Failed to write chunk of ${destination}/${file_name} to disk`);
         }
 
-        await writer.flush();
+        await writer.end(); // end() flushes + closes; no need for separate flush()
 
-        if (written_bytes == content_length) {
+        if (written_bytes === content_length) {
             resolve(`Wrote ${written_bytes} bytes to disk for ${file_name}`);
         } else {
             reject(`W: Failed to write filestream to disk. Wrote ${written_bytes} bytes, expected ${content_length}`);
@@ -121,7 +128,8 @@ export async function gh_request(path: string, api_key: string, method: string =
     if (res.status === 403 && res.headers.get('x-ratelimit-remaining') === '0') {
         const reset = res.headers.get('x-ratelimit-reset');
         const secs = reset ? Math.max(0, parseInt(reset) * 1000 - Date.now()) / 1000 : undefined;
-        console.warn(`W: GitHub rate limit exceeded. Resets in ~${secs?.toFixed(0)}s`);
+        log_err(`GitHub rate limit exceeded. Resets in ~${secs?.toFixed(0)}s`);
+        throw Error();
     }
 
     if (!res.ok) {

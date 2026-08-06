@@ -1,14 +1,6 @@
 //@ts-check
 import { binary_search_disable } from './subcommands/binary';
-import {
-    enable_all_mods,
-    disable_all_mods,
-    get_details_from_mainclass,
-    type update_frequency,
-    isUpdateFrequency,
-    are_all_mods_unlocked,
-    filter_for_faulty_dependencies,
-} from './utils/mods';
+import { enable_all_mods, disable_all_mods, type update_frequency, isUpdateFrequency, are_all_mods_unlocked, parse_mod_details } from './utils/mods';
 import { annotate } from './subcommands/annotate';
 import { disable_atomic_deep, enable_atomic_deep, list_mods, list_mods_folder, list_mods_wide, toggle_mod } from './subcommands/simple';
 import { visualize_graph } from './subcommands/graph';
@@ -22,10 +14,11 @@ import {
 } from './subcommands/version';
 import { build_bootstrap, build_version_for_diff, bundle_pack_into_starter, initialize_packaging } from './subcommands/package';
 import { package_image } from './subcommands/image';
-import { assert_config_exists, CI_INTEGRATION } from './utils/config';
+import { assert_config_exists, CI_INTEGRATION, MOD_BASE_DIR } from './utils/config';
 import { init_config } from './subcommands/init';
 import { apply_github_pr, pr_gate } from './subcommands/pr';
 import { set_debug_enabled } from './utils/log';
+import { pr_deps } from './subcommands/pr/deps';
 
 //#region Command Framework
 interface CommandDefinition {
@@ -301,14 +294,20 @@ const commands: Record<string, CommandDefinition> = {
     },
     version_verify_links: {
         description: 'Verify all mods source links against their version and update it if the local version is newer.',
-        usage: 'version verify_links [--dry]',
+        usage: 'version verify_links [--dry] [--org <github_org>]...',
         is_subcommand: true,
         handler: async (args) => {
             if (args.includes('--help')) {
                 console.log(commands['version_verify_links']?.usage);
                 return;
             }
-            await verify_and_refresh_source_links({ dry: args.includes('--dry') });
+            const orgs: string[] = [];
+            for (let i = 0; i < args.length; i++) {
+                if (args[i] === '--org' && args[i + 1] != undefined) {
+                    orgs.push(args[++i] as string);
+                }
+            }
+            await verify_and_refresh_source_links({ dry: args.includes('--dry'), orgs: orgs.length > 0 ? orgs : undefined });
             return;
         },
     },
@@ -499,7 +498,7 @@ const commands: Record<string, CommandDefinition> = {
     },
     pr: {
         description: 'Apply or validate PR dependency chains',
-        usage: 'pr <apply|gate>',
+        usage: 'pr <apply|gate|deps>',
         handler: async (args) => {
             const mode = args[0]?.toLowerCase();
             const cmd_args = args.slice(1);
@@ -521,7 +520,7 @@ const commands: Record<string, CommandDefinition> = {
     },
     pr_apply: {
         description: 'Fetch and apply a mod build artifact from a GitHub PR, recursively resolving cross-repo deps and merged-since-daily PRs',
-        usage: 'pr apply <pr_url> [--dry] [--build_job <name>] [--artifact_name <part>] [--allow_failed_workflows] [--allow_external_owners] [--other_allowed_owner <owner>]... [--wait_timeout <seconds>] [--poll_interval <seconds>] [--debug]',
+        usage: 'pr apply <pr_url> [--dry] [--build_job <name>]... [--artifact_name <part>]... [--allow_failed_workflows] [--allow_external_owners] [--other_allowed_owner <owner>]... [--wait_timeout <seconds>] [--poll_interval <seconds>] [pack_variant <variant name>] [--debug]',
         is_subcommand: true,
         handler: async (args) => {
             if (args.includes('--help') || args.includes('-h')) {
@@ -530,18 +529,21 @@ const commands: Record<string, CommandDefinition> = {
             }
 
             // Parse value-flags first, then collect positionals.
-            let build_job: string | undefined;
-            let artifact_name: string | undefined;
             let wait_timeout_seconds: number | undefined;
             let poll_interval_seconds: number | undefined;
+            let pack_variant_name: string | undefined;
+            const build_jobs: string[] = [];
+            const artifact_names: string[] = [];
             const other_allowed_owners: string[] = [];
             const positional: string[] = [];
             for (let i = 0; i < args.length; i++) {
                 const arg = args[i];
                 if (arg === '--build_job' && args[i + 1] != undefined) {
-                    build_job = args[++i];
+                    build_jobs.push(args[++i] as string);
+                } else if (arg === '--pack_variant' && args[i + 1] != undefined) {
+                    pack_variant_name = args[++i];
                 } else if (arg === '--artifact_name' && args[i + 1] != undefined) {
-                    artifact_name = args[++i];
+                    artifact_names.push(args[++i] as string);
                 } else if (arg === '--other_allowed_owner' && args[i + 1] != undefined) {
                     other_allowed_owners.push(args[++i] as string);
                 } else if (arg === '--wait_timeout' && args[i + 1] != undefined) {
@@ -559,20 +561,21 @@ const commands: Record<string, CommandDefinition> = {
 
             await apply_github_pr(positional[0], {
                 dry: args.includes('--dry'),
-                build_job,
-                artifact_name,
+                build_jobs: build_jobs.length > 0 ? build_jobs : undefined,
+                artifact_name: artifact_names.length > 0 ? artifact_names : undefined,
                 allow_failed_workflows: args.includes('--allow_failed_workflows'),
                 allow_external_owners: args.includes('--allow_external_owners'),
                 other_allowed_owners: other_allowed_owners.length > 0 ? other_allowed_owners : undefined,
                 wait_timeout_ms,
                 poll_interval_ms,
+                pack_variant_name
             });
             return;
         },
     },
     pr_gate: {
-        description: 'Validate every cross-repo dep of the given PR is merged with a published release; exit 0 = mergeable',
-        usage: 'pr gate <pr_url> [--allow_external_owners] [--other_allowed_owner <owner>]... [--build_job <name>] [--debug]',
+        description: 'Validate every cross-repo dep of the given PR is merged with a published release; exit 0 = mergeable. Pass --allow_all_merged to also accept merged-but-unreleased deps.',
+        usage: 'pr gate <pr_url> [--allow_external_owners] [--other_allowed_owner <owner>]... [--build_job <name>]... [--allow_all_merged] [--debug]',
         is_subcommand: true,
         handler: async (args) => {
             if (args.includes('--help') || args.includes('-h')) {
@@ -580,13 +583,13 @@ const commands: Record<string, CommandDefinition> = {
                 return;
             }
 
-            let build_job: string | undefined;
+            const build_jobs: string[] = [];
             const other_allowed_owners: string[] = [];
             const positional: string[] = [];
             for (let i = 0; i < args.length; i++) {
                 const arg = args[i];
                 if (arg === '--build_job' && args[i + 1] != undefined) {
-                    build_job = args[++i];
+                    build_jobs.push(args[++i] as string);
                 } else if (arg === '--other_allowed_owner' && args[i + 1] != undefined) {
                     other_allowed_owners.push(args[++i] as string);
                 } else if (arg != null && !arg.startsWith('-')) {
@@ -595,7 +598,66 @@ const commands: Record<string, CommandDefinition> = {
             }
 
             await pr_gate(positional[0], {
-                build_job,
+                build_jobs: build_jobs.length > 0 ? build_jobs : undefined,
+                allow_external_owners: args.includes('--allow_external_owners'),
+                other_allowed_owners: other_allowed_owners.length > 0 ? other_allowed_owners : undefined,
+                allow_all_merged: args.includes('--allow_all_merged'),
+            });
+            return;
+        },
+    },
+    pr_deps: {
+        description: 'Download direct dependencies of a PR and build a JSON metadata manifest',
+        usage: 'pr deps <pr_url> --target_dir <dir> --jar_suffix <suffix> [--dry] [--build_job <name>]... [--artifact_name <part>]... [--allow_external_owners] [--other_allowed_owner <owner>]... [--debug]',
+        is_subcommand: true,
+        handler: async (args) => {
+            if (args.includes('--help') || args.includes('-h')) {
+                console.log(commands['pr_deps']?.usage);
+                return;
+            }
+
+            let target_dir: string | undefined;
+            let jar_suffix: string | undefined;
+            const build_jobs: string[] = [];
+            const artifact_names: string[] = [];
+            const other_allowed_owners: string[] = [];
+            const positional: string[] = [];
+
+            for (let i = 0; i < args.length; i++) {
+                const arg = args[i];
+                if (arg === '--target_dir' && args[i + 1] != undefined) {
+                    target_dir = args[++i];
+                } else if (arg === '--jar_suffix' && args[i + 1] != undefined) {
+                    jar_suffix = args[++i];
+                } else if (arg === '--build_job' && args[i + 1] != undefined) {
+                    build_jobs.push(args[++i] as string);
+                } else if (arg === '--artifact_name' && args[i + 1] != undefined) {
+                    artifact_names.push(args[++i] as string);
+                } else if (arg === '--other_allowed_owner' && args[i + 1] != undefined) {
+                    other_allowed_owners.push(args[++i] as string);
+                } else if (arg != null && !arg.startsWith('-')) {
+                    positional.push(arg);
+                }
+            }
+
+            if (!target_dir) {
+                console.error('Error: Missing required flag --target_dir');
+                console.log(commands['pr_deps']?.usage);
+                process.exit(1);
+            }
+
+            if (!jar_suffix) {
+                console.error('Error: Missing required flag --jar_suffix');
+                console.log(commands['pr_deps']?.usage);
+                process.exit(1);
+            }
+
+            await pr_deps(positional[0], {
+                target_dir,
+                jar_suffix,
+                dry: args.includes('--dry'),
+                build_jobs: build_jobs.length > 0 ? build_jobs : undefined,
+                artifact_name: artifact_names.length > 0 ? artifact_names : undefined,
                 allow_external_owners: args.includes('--allow_external_owners'),
                 other_allowed_owners: other_allowed_owners.length > 0 ? other_allowed_owners : undefined,
             });
@@ -605,14 +667,7 @@ const commands: Record<string, CommandDefinition> = {
     debug: {
         description: 'Run debug operations',
         handler: async (args) => {
-            // console.log(
-            //     filter_for_faulty_dependencies(
-            //         (await get_details_from_mainclass('./.minecraft/mods/' + args[0])).main_deps,
-            //         args[1] as string,
-            //         [],
-            //     ),
-            // );
-            // test_pr_extraction()
+            console.log(await parse_mod_details(MOD_BASE_DIR + '/' + 'gregtech-5.09.52.526-git.1+dcb1a7eb3c-dirty.jar'));
         },
     },
 };
@@ -665,7 +720,13 @@ async function main() {
 
 // Forward to main function with arguments
 if (import.meta.url === import.meta.resolve('file://' + process.argv[1])) {
-    main().catch(console.error);
+    main().catch((e) => {
+        console.error(e);
+        process.exitCode = 1;
+    });
 } else {
-    main().catch(console.error);
+    main().catch((e) => {
+        console.error(e);
+        process.exitCode = 1;
+    });
 }

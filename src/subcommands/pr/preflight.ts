@@ -18,6 +18,7 @@ export type PreflightResult =
 // they either absorb cleanly or block the resolve.
 export async function preflight_same_repo_dep(initial: PRMeta, dep: PRMeta, default_branch: string, cache: GhCache): Promise<PreflightResult> {
     const dep_base = dep.base.ref;
+    log_debug(`Preflight: dep=${dep.pr_id} (base=${dep_base}), initial=${initial.pr_id} (head=${initial.head.ref}), default_branch=${default_branch}`);
 
     if (dep_base === initial.head.ref) {
         // Dep targets the same branch as the initial PR.
